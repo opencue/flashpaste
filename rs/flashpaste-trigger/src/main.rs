@@ -98,7 +98,10 @@ fn main() -> ! {
     if args.stage_text {
         // Decoupled path — no pane needed, no bash fallback. The caller
         // (clipboard-set.sh) handles its own fallback if we exit non-zero.
-        std::process::exit(stage_text_main());
+        trigger_log("stage-text", "-", "start", "reading stdin");
+        let code = stage_text_main();
+        trigger_log("stage-text", "-", "exit", &format!("code={code}"));
+        std::process::exit(code);
     }
 
     let pane = match &args.pane {
@@ -109,16 +112,75 @@ fn main() -> ! {
         }
     };
 
+    let trigger_source = std::env::var("TMUX_PASTE_TRIGGER")
+        .unwrap_or_else(|_| "unset".to_string());
+    trigger_log("paste", &pane, "start", &format!("trigger={trigger_source}"));
+
     if args.force_fallback {
+        trigger_log("paste", &pane, "exec-bash", "force-fallback");
         exec_bash_fallback(&pane);
     }
 
     let paste_args = PasteArgs { pane: pane.clone(), op: args.op };
     match try_daemon(&paste_args) {
-        Ok(DaemonOutcome::Handled) => std::process::exit(0),
-        Ok(DaemonOutcome::FallbackRequested) => exec_bash_fallback(&pane),
-        Err(_) => exec_bash_fallback(&pane),
+        Ok(DaemonOutcome::Handled) => {
+            trigger_log("paste", &pane, "handled", "daemon");
+            std::process::exit(0);
+        }
+        Ok(DaemonOutcome::FallbackRequested) => {
+            trigger_log("paste", &pane, "exec-bash", "daemon-declined");
+            exec_bash_fallback(&pane);
+        }
+        Err(e) => {
+            trigger_log("paste", &pane, "exec-bash", &format!("daemon-error: {e}"));
+            exec_bash_fallback(&pane);
+        }
     }
+}
+
+/// Per-invocation log written to `$FLASHPASTE_TRIGGER_LOG` or
+/// `~/.local/state/flashpaste-trigger.log`. The whole point of this log
+/// is debugging "right-click Paste doesn't paste but Ctrl+V does":
+/// every invocation appends one line so you can see when each handler
+/// fires, what the trigger source was, and which path the daemon chose.
+///
+/// Suppress with `FLASHPASTE_QUIET=1`.
+fn trigger_log(op: &str, pane: &str, phase: &str, detail: &str) {
+    if std::env::var_os("FLASHPASTE_QUIET").is_some() {
+        return;
+    }
+    let path = log_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
+        return;
+    };
+    let ts = iso8601_utc_now();
+    let pid = std::process::id();
+    let _ = writeln!(
+        f,
+        "{ts} pid={pid} op={op} pane={pane} phase={phase} :: {detail}"
+    );
+}
+
+fn log_path() -> PathBuf {
+    if let Ok(p) = std::env::var("FLASHPASTE_TRIGGER_LOG") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home)
+            .join(".local")
+            .join("state")
+            .join("flashpaste-trigger.log");
+    }
+    PathBuf::from("/tmp/flashpaste-trigger.log")
 }
 
 struct PasteArgs {

@@ -42,10 +42,15 @@ bind -n C-v run-shell -b "TMUX_PASTE_TRIGGER=ctrl-v flashpaste-trigger '#{pane_i
 bind -n MouseDown2Pane run-shell -b "buf=$(sh -c '#{@paste}'); if [ -n \"$buf\" ]; then printf '%s' \"$buf\" | tmux load-buffer -b mid_paste - 2>/dev/null && tmux paste-buffer -d -p -b mid_paste -t '#{pane_id}' 2>/dev/null; fi"
 
 # Right-click pane menu with Paste item — same tier-3 trigger path.
+# Note: many tmux configs override this with `MouseUp3Pane`. If you
+# already have a custom right-click menu, just make sure its Paste item
+# invokes `flashpaste-trigger '#{pane_id}'` with the TMUX_PASTE_TRIGGER
+# env var so ~/.local/state/flashpaste-trigger.log can distinguish the
+# right-click path from the C-v path during debugging.
 bind -n MouseDown3Pane display-menu -O -x M -y M \
   -T "#[align=centre,fg=#FFFFFF,bold] pane #{pane_index} " \
   "#[fg=#34C759]↳ Paste" p \
-    "run-shell -b \"flashpaste-trigger '#{pane_id}' 2>/dev/null || /home/$USER/.local/bin/tmux-paste-dispatch.sh '#{pane_id}'\""
+    "run-shell -b \"TMUX_PASTE_TRIGGER=right-click-menu flashpaste-trigger '#{pane_id}' 2>/dev/null || TMUX_PASTE_TRIGGER=right-click-menu /home/$USER/.local/bin/tmux-paste-dispatch.sh '#{pane_id}'\""
 
 # Recursion-guard note: the C-v binding above intentionally re-invokes
 # the dispatcher when kitty `send-text` injects a \026 byte. The

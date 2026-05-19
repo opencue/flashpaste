@@ -157,6 +157,8 @@ async fn write_response(stream: &mut UnixStream, value: &Value) -> Result<()> {
 }
 
 async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) -> Value {
+    info!(pane, "paste: request received");
+
     // ─── Recursion guard ─────────────────────────────────────────────
     // Fact #2 from the spec: tmux's `bind -n C-v` re-fires when the kitty
     // `send_text \026` byte reaches tmux. The trigger binary calls us
@@ -164,9 +166,13 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
     let now = now_unix_ms();
     let last = state.last_paste_ms.load(Ordering::Relaxed);
     if now.saturating_sub(last) < RECURSION_DEDUPE_MS {
-        debug!(
+        // INFO not DEBUG: this fires every paste (the recursive C-v echo
+        // is normal) and v1.20 user-reported "right-click Paste does
+        // nothing" debugging needs this visible in journalctl.
+        info!(
+            pane,
             delta_ms = now - last,
-            "paste dedupe — within recursion window"
+            "paste: dedupe — within recursion window (this is normal for the C-v echo back from kitty send-text)"
         );
         return json!({ "ok": true, "deduped": true });
     }
@@ -181,7 +187,7 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
     let staged = match state.staged_image().await {
         Some(img) if img.is_fresh() => img,
         Some(_) => {
-            warn!("staged image too old; daemon punting to bash");
+            warn!(pane, "paste: staged image too old; punting to bash");
             return json!({
                 "ok": false,
                 "reason": "stale-image",
@@ -189,7 +195,10 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
             });
         }
         None => {
-            debug!("no staged image (clipboard is empty or holds text); daemon punting to bash");
+            info!(
+                pane,
+                "paste: no staged image (clipboard empty or holds text); punting to bash"
+            );
             return json!({
                 "ok": false,
                 "reason": "no-image",

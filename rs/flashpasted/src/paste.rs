@@ -21,7 +21,7 @@ use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
 use crate::kitty;
-use crate::state::{SharedState, StagedImage};
+use crate::state::{now_unix_ms, SharedState, StagedImage};
 use crate::tmux;
 
 /// How long to wait before re-binding `C-v` in tmux. The bash dispatcher
@@ -53,6 +53,27 @@ pub async fn dispatch_image_paste(
         );
     };
     debug!(kitty_sock = %kitty_sock.display(), "resolved kitty socket");
+
+    // Step 0: re-assert clipboard ownership.
+    //
+    // Why: between two pastes, the user can have copied text (the v1.19
+    // OSC 52 path makes kitty the live Wayland selection owner with
+    // text/plain bytes). The daemon's `latest_image` is still cached in
+    // memory, but the *live* clipboard owner has changed. When we
+    // send-text \026 and Claude calls `wl-paste -t image/png`, kitty
+    // serves the (text) selection — Claude reads 0 image bytes and
+    // silently does nothing. Symptom: "right-click → Paste doesn't
+    // paste the image; Ctrl+V right after a screenshot does."
+    //
+    // Bumping the stage notifier wakes the wayland.rs + x11.rs owner
+    // tasks, which re-claim the selection with the staged image bytes.
+    // The brief sleep lets the round-trip land before we send-text.
+    // On mutter where the Wayland claim is rejected outright (no
+    // ext-data-control / wlr-data-control), the X11 re-claim still
+    // succeeds and the wl-paste shim's xclip fallback picks it up.
+    info!(pane, "paste: re-asserting clipboard ownership before dispatch");
+    let _ = state.stage_notifier_tx.send(now_unix_ms());
+    tokio::time::sleep(Duration::from_millis(40)).await;
 
     // Step 1: select pane. Best-effort.
     tmux::select_pane(&pane).await;
