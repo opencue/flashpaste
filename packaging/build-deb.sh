@@ -74,10 +74,13 @@ fi
 # (or the postinst can symlink it to $HOME/paste_image.sh per user — handled below).
 install -m 0755 "$REPO_DIR/bin/paste_image.sh" "$STAGE/usr/share/flashpaste/paste_image.sh"
 
-# Desktop entries.
-install -m 0644 "$REPO_DIR/share/applications/wl-clipboard.desktop" "$STAGE/usr/share/applications/"
-install -m 0644 "$REPO_DIR/share/applications/wl-paste.desktop"     "$STAGE/usr/share/applications/"
-install -m 0644 "$REPO_DIR/share/applications/wl-copy.desktop"      "$STAGE/usr/share/applications/"
+# Desktop entries — glob every *.desktop under share/applications/ so new
+# entries (e.g. org.flashpaste.daemon.desktop matching the flashpasted
+# daemon's Wayland app_id) ship without a build-script edit.
+for desk in "$REPO_DIR"/share/applications/*.desktop; do
+  [ -f "$desk" ] || continue
+  install -m 0644 "$desk" "$STAGE/usr/share/applications/"
+done
 
 # systemd user units.
 install -m 0644 "$REPO_DIR/systemd/clipboard-janitor.service"               "$STAGE/usr/lib/systemd/user/"

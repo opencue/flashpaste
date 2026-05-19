@@ -64,17 +64,20 @@ if [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wl-copy >/dev/null 2>&1; then
       kill -TERM "$_prev" 2>/dev/null
     fi
   fi
-  wl-copy <"$_tmp"
-  rc=$?
-  # wl-copy default-daemonizes — parent exits, the surviving daemon
-  # holds the clipboard. pgrep -n returns the newest matching pid,
-  # which is the daemon we just spawned (races with another concurrent
-  # caller are tolerable: worst case we reap someone else's wl-copy
-  # next time, identical to what the janitor already does).
-  _new=$(pgrep -u "$(id -u)" -n -x wl-copy 2>/dev/null)
-  [ -n "$_new" ] && printf '%s\n' "$_new" > "$_pidfile" 2>/dev/null
-  clog "clipboard-set" "event=done" "backend=wl-copy" "rc=$rc" "pid=${_new:-?}"
-  exit $rc
+  # IMPORTANT: wl-copy does NOT auto-daemonize on this box (man wl-copy:
+  # "stays in the foreground until the clipboard contents change"). The
+  # v1.14 janitor reaps wl-copy >3s old, so any synchronous `wl-copy`
+  # call here would exit 143 (SIGTERM) ~3s after we returned — except
+  # we already exited rc=$? from the foreground process, so tmux's
+  # run-shell binding shows "...clipboard-set.sh' returned 143" in the
+  # pane. Fix: explicitly background wl-copy, record its pid, and exit
+  # 0. wl-copy lives until janitor reap; clipboard contents stay set.
+  setsid wl-copy <"$_tmp" >/dev/null 2>&1 &
+  _new=$!
+  disown 2>/dev/null || true
+  printf '%s\n' "$_new" > "$_pidfile" 2>/dev/null
+  clog "clipboard-set" "event=done" "backend=wl-copy" "rc=0" "pid=${_new}"
+  exit 0
 fi
 if [ -n "${DISPLAY:-}" ] && command -v xclip >/dev/null 2>&1; then
   clog "clipboard-set" "event=backend-chosen" "backend=xclip"

@@ -7,12 +7,14 @@
 # text paste. For images, use Ctrl+Alt+V which sends a raw \026 byte
 # via `kitty @ send-text` so the inner TUI gets the keystroke directly.
 
-# Ctrl+V → text paste through kitty's clipboard action.
-map ctrl+v       launch --type=background --copy-env -- ~/paste_image.sh
+# Ctrl+V → tier-3 path through flashpasted daemon (~5ms round-trip).
+# paste_image.sh stays as the fallback when the daemon socket is missing
+# (e.g. before `systemctl --user start flashpasted.service`).
+map ctrl+v       launch --type=background --copy-env -- sh -c 'flashpaste-trigger "$(tmux display-message -p "#{pane_id}" 2>/dev/null)" 2>/dev/null || ~/paste_image.sh'
 
-# Ctrl+Alt+V → image paste. Sends raw Ctrl-V byte to focused window;
-# flashpaste's wl-paste shim then delivers the image bytes from xclip
-# when the inner TUI reads the clipboard.
+# Ctrl+Alt+V → force the legacy image-paste path (sends raw Ctrl-V via
+# kitty @ send-text). Useful when the daemon is intentionally disabled
+# or when debugging xclip ownership.
 map ctrl+alt+v   launch --type=background --copy-env -- ~/paste_image.sh image
 
 # Optional: bind PrtScr to GNOME's screenshot UI (file lands in
