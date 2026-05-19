@@ -30,10 +30,12 @@
 //! 7. If --print-path, write the final path to stdout.
 
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
@@ -72,6 +74,27 @@ struct Cli {
     /// Print the final PNG path to stdout (for shell composition).
     #[arg(long)]
     print_path: bool,
+
+    /// Run OCR on the captured image via `tesseract`. With `--print-path`
+    /// the output is `<path>\n\n<ocr text>`; without it, just the text.
+    /// If `tesseract` isn't installed we log a warning and skip OCR —
+    /// the capture itself still succeeds.
+    #[arg(long)]
+    ocr: bool,
+
+    /// Skip file save: just run OCR on the latest screenshot in
+    /// `~/Pictures/Screenshots/` (within 60 s) and print the text. Useful
+    /// for `flashpaste-shoot --ocr-only | pbcopy`-style pipelines.
+    /// Mutually-exclusive with the capture path; if set, no portal
+    /// request is made.
+    #[arg(long)]
+    ocr_only: bool,
+
+    /// Hand the captured image to an annotation editor before returning
+    /// (arrows / highlights / blur). Tries `swappy`, then `satty`. If
+    /// neither is installed we log a warning and keep the original file.
+    #[arg(long)]
+    annotate: bool,
 
     /// Portal request timeout, in milliseconds.
     #[arg(long, default_value_t = 5_000, value_name = "N")]
@@ -320,6 +343,167 @@ async fn try_stage_to_daemon(path: &Path, mime: &str) -> Result<()> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────
+// OCR + annotate hooks (process-level integrations)
+// ─────────────────────────────────────────────────────────────────────────
+//
+// Both features are implemented as opt-in shellouts to standard tooling
+// rather than baked-in libraries. Rationale:
+//
+//   * `tesseract` is the de-facto Linux OCR engine; statically linking
+//     a Rust alternative (e.g. ocrs) would balloon binary size for a
+//     feature most users won't enable.
+//   * `swappy` / `satty` already implement the annotation UX users
+//     expect from screenshot tools (arrows, blur, text overlays). No
+//     point reimplementing that in this binary.
+//
+// Both call sites are GRACEFUL: missing tool → stderr warning + skip,
+// never a hard failure. The capture itself is the contract — these are
+// post-processors.
+
+/// `which`-style PATH lookup. Returns true if `bin` is on PATH and is
+/// executable. We don't shell out — that's another ~5 ms fork + a
+/// dependency on `command -v` being available.
+fn is_on_path(bin: &str) -> bool {
+    let Some(path) = env::var_os("PATH") else {
+        return false;
+    };
+    for dir in env::split_paths(&path) {
+        let candidate = dir.join(bin);
+        // Cheaper than `metadata().is_file()` — we accept symlinks too,
+        // and we don't actually care about the perm bits because Linux
+        // checks them at exec time.
+        if candidate.is_file() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Run `tesseract <path> -` (the `-` writes to stdout). On success
+/// returns the OCR text trimmed of trailing whitespace. Returns `None`
+/// if tesseract isn't on PATH — the caller emits the warning. Any
+/// other error (tesseract present but unhappy) is bubbled up so we can
+/// log the stderr.
+fn run_tesseract(path: &Path) -> Result<Option<String>> {
+    if !is_on_path("tesseract") {
+        return Ok(None);
+    }
+    let output = Command::new("tesseract")
+        .arg(path.as_os_str())
+        .arg("-")
+        // -l eng is implicit; we deliberately don't pin it so the user's
+        // installed language packs are honoured.
+        .output()
+        .context("spawn tesseract")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!(
+            "tesseract exited {}: {}",
+            output.status,
+            stderr.trim()
+        ));
+    }
+    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+    Ok(Some(text.trim_end().to_string()))
+}
+
+/// Find the newest image in `~/Pictures/Screenshots/` whose mtime is
+/// within `max_age_secs` of now. Mirrors the in-tree helper in
+/// `flashpaste-common::screenshot::find_latest` but we duplicate it
+/// inline (this crate has no `flashpaste-common` dep — see the header
+/// comment on the URI parser).
+fn find_latest_screenshot(max_age_secs: u64) -> Result<Option<PathBuf>> {
+    let dir = screenshots_dir()?;
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+    let entries = fs::read_dir(&dir)
+        .with_context(|| format!("read_dir({})", dir.display()))?;
+    let now = SystemTime::now();
+    let mut best: Option<(SystemTime, PathBuf)> = None;
+    for entry in entries.flatten() {
+        let Ok(ft) = entry.file_type() else { continue };
+        if !ft.is_file() {
+            continue;
+        }
+        let p = entry.path();
+        if !is_image_ext(p.extension()) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        let Ok(mtime) = meta.modified() else { continue };
+        match &best {
+            None => best = Some((mtime, p)),
+            Some((bm, _)) if mtime > *bm => best = Some((mtime, p)),
+            _ => {}
+        }
+    }
+    let Some((mtime, p)) = best else { return Ok(None) };
+    if let Ok(age) = now.duration_since(mtime) {
+        if age.as_secs() > max_age_secs {
+            return Ok(None);
+        }
+    }
+    Ok(Some(p))
+}
+
+fn is_image_ext(ext: Option<&OsStr>) -> bool {
+    let Some(ext) = ext.and_then(|s| s.to_str()) else {
+        return false;
+    };
+    matches!(ext.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg")
+}
+
+/// Run an annotation editor on `path`, writing back to the same file.
+/// Tries `swappy -f <path> -o <path>` first (the GNOME-native UX), then
+/// `satty --filename <path> --output-filename <path>`. If neither is
+/// installed, prints a warning and returns Ok — the original file is
+/// untouched, matching the documented behaviour ("--annotate works
+/// without them but degrades").
+///
+/// Blocks until the editor exits so the caller can hand the path off
+/// to the daemon stage / `--print-path` path with confidence the bytes
+/// reflect the user's edits.
+fn run_annotate(path: &Path) -> Result<()> {
+    if is_on_path("swappy") {
+        info!(tool = "swappy", path = %path.display(), "launching annotation editor");
+        let status = Command::new("swappy")
+            .arg("-f")
+            .arg(path.as_os_str())
+            .arg("-o")
+            .arg(path.as_os_str())
+            .status()
+            .context("spawn swappy")?;
+        if !status.success() {
+            // Don't fail hard — user might have closed the editor without
+            // saving. The file is whatever swappy left behind (usually
+            // the original).
+            warn!(?status, "swappy exited non-zero; keeping current file bytes");
+        }
+        return Ok(());
+    }
+    if is_on_path("satty") {
+        info!(tool = "satty", path = %path.display(), "launching annotation editor");
+        let status = Command::new("satty")
+            .arg("--filename")
+            .arg(path.as_os_str())
+            .arg("--output-filename")
+            .arg(path.as_os_str())
+            .status()
+            .context("spawn satty")?;
+        if !status.success() {
+            warn!(?status, "satty exited non-zero; keeping current file bytes");
+        }
+        return Ok(());
+    }
+    eprintln!(
+        "flashpaste-shoot: --annotate requested but neither `swappy` nor `satty` is on PATH; \
+         skipping annotation. Install one with: `apt install swappy` (or `cargo install satty`)."
+    );
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────
 // Tracing
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -364,6 +548,12 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     init_tracing(cli.verbose);
 
+    // ─── --ocr-only short-circuit ───────────────────────────────────────
+    // Skip the portal entirely; just OCR the most recent screenshot.
+    if cli.ocr_only {
+        return run_ocr_only_path().await;
+    }
+
     // 1. Portal capture (with timeout).
     let portal_path = timeout(
         Duration::from_millis(cli.timeout_ms),
@@ -390,7 +580,17 @@ async fn main() -> Result<()> {
         .context("copy portal output to destination")?;
     info!(dst = %output_path.display(), mime = mime, "wrote screenshot");
 
-    // 4. Best-effort daemon stage. The file is already on disk so even if
+    // 4. Optional annotation pass. Runs BEFORE daemon stage so the
+    //    daemon sees the annotated bytes, not the raw capture. Blocking
+    //    by design — the user is in the editor and we want the final
+    //    file before we tell anyone about it.
+    if cli.annotate {
+        if let Err(e) = run_annotate(&output_path) {
+            warn!("annotate failed ({e:#}); proceeding with raw capture");
+        }
+    }
+
+    // 5. Best-effort daemon stage. The file is already on disk so even if
     //    this fails, auto-pickup in tmux-paste-dispatch.sh will find it.
     if !cli.no_daemon {
         match try_stage_to_daemon(&output_path, mime).await {
@@ -401,10 +601,68 @@ async fn main() -> Result<()> {
         debug!("--no-daemon set; skipping daemon stage");
     }
 
-    // 5. Optional path emission for shell pipelines.
-    if cli.print_path {
-        println!("{}", output_path.display());
+    // 6. Optional OCR. Done AFTER daemon stage so we don't delay the
+    //    clipboard becoming usable — OCR can take a few hundred ms even
+    //    on modern hardware.
+    let ocr_text = if cli.ocr {
+        match run_tesseract(&output_path) {
+            Ok(Some(text)) => Some(text),
+            Ok(None) => {
+                eprintln!(
+                    "flashpaste-shoot: --ocr requested but `tesseract` isn't on PATH; \
+                     skipping OCR. Install with: `apt install tesseract-ocr`."
+                );
+                None
+            }
+            Err(e) => {
+                warn!("OCR failed: {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // 7. Output emission. Combinations:
+    //    --print-path             → path
+    //    --ocr                    → ocr text
+    //    --print-path --ocr       → path\n\nocr text
+    match (cli.print_path, ocr_text) {
+        (true, Some(text)) => {
+            println!("{}", output_path.display());
+            println!();
+            println!("{text}");
+        }
+        (true, None) => println!("{}", output_path.display()),
+        (false, Some(text)) => println!("{text}"),
+        (false, None) => {}
     }
 
     Ok(())
+}
+
+/// `--ocr-only` flow: don't capture, just OCR the latest screenshot.
+/// Defaults to a 60s freshness window so a stale screenshot from days
+/// ago isn't surprising. Prints the OCR text on stdout; exits non-zero
+/// if there's nothing to OCR or tesseract isn't installed (this flag
+/// has a stronger contract than `--ocr`: the caller is piping us).
+async fn run_ocr_only_path() -> Result<()> {
+    let path = find_latest_screenshot(60)?.ok_or_else(|| {
+        anyhow!(
+            "no screenshot within 60s in {}; capture one first or use --ocr",
+            screenshots_dir()
+                .map(|d| d.display().to_string())
+                .unwrap_or_else(|_| "~/Pictures/Screenshots".to_string())
+        )
+    })?;
+    debug!(path = %path.display(), "running --ocr-only on latest screenshot");
+    match run_tesseract(&path)? {
+        Some(text) => {
+            println!("{text}");
+            Ok(())
+        }
+        None => Err(anyhow!(
+            "tesseract is not on PATH; install with `apt install tesseract-ocr`"
+        )),
+    }
 }
