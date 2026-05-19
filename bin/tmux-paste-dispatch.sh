@@ -125,8 +125,18 @@
 set -u
 
 # --- logging ---------------------------------------------------------
+# Set FLASHPASTE_QUIET=1 in the environment to make log/t/clog no-ops.
+# Saves ~5-15ms per invocation by skipping the `date` forks and stat
+# ops. Default: verbose (writes ~/.local/state/tmux-paste.log and
+# ~/.local/state/clipboard-pipeline.log).
 readonly LOG="${TMUX_PASTE_LOG:-$HOME/.local/state/tmux-paste.log}"
 mkdir -p "$(dirname "$LOG")" 2>/dev/null
+
+if [ "${FLASHPASTE_QUIET:-0}" = "1" ]; then
+  log()  { :; }
+  clog() { :; }
+  t()    { :; }
+else
 . /home/deadpool/.local/bin/clip-pipeline-log.sh 2>/dev/null || true
 type clog >/dev/null 2>&1 || clog() { :; }
 log() {
@@ -159,6 +169,7 @@ t() {
   printf '[%s] T+%4dms (Δ%3dms) :: %s\n' "$(date '+%H:%M:%S.%3N')" "$total" "$delta" "$*" >>"$LOG"
   clog "paste-dispatch" "event=timing" "total_ms=$total" "delta_ms=$delta" "step='$*'"
 }
+fi  # /FLASHPASTE_QUIET branch
 # --------------------------------------------------------------------
 
 pane="${1:-}"

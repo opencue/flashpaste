@@ -26,7 +26,8 @@ done
 mkdir -p "$BIN_DST"
 
 for script in tmux-paste-dispatch.sh clipboard-set.sh clipboard-janitor.sh \
-              get-clipboard-text.sh clip-pipeline-log.sh screenshot-to-clipboard; do
+              get-clipboard-text.sh clip-pipeline-log.sh screenshot-to-clipboard \
+              flashpaste-screenshot-preload.sh; do
   src="$BIN_SRC/$script"
   dst="$BIN_DST/$script"
   if [ -e "$dst" ] && [ ! -L "$dst" ]; then
@@ -76,6 +77,29 @@ WantedBy=default.target
 EOF
 say "wrote $SYSTEMD_DST/clipboard-janitor.service"
 
+# Screenshot watcher — fires the preload script when ~/Pictures/Screenshots/
+# changes, so xclip is hot before the user even reaches for paste.
+cat > "$SYSTEMD_DST/flashpaste-screenshot-watcher.path" <<'EOF'
+[Unit]
+Description=Watch ~/Pictures/Screenshots/ for new PNGs (flashpaste)
+
+[Path]
+PathChanged=%h/Pictures/Screenshots
+Unit=flashpaste-screenshot-watcher.service
+
+[Install]
+WantedBy=default.target
+EOF
+cat > "$SYSTEMD_DST/flashpaste-screenshot-watcher.service" <<'EOF'
+[Unit]
+Description=Pre-load fresh screenshot into xclip (flashpaste)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/flashpaste-screenshot-preload.sh
+EOF
+say "wrote flashpaste-screenshot-watcher.{path,service}"
+
 # ydotoold socket-path patch (Ubuntu 24.04 0.1.8 bug)
 if systemctl --user list-unit-files ydotoold.service >/dev/null 2>&1; then
   cat > "$SYSTEMD_DST/ydotoold.service.d/flashpaste-socket.conf" 2>/dev/null <<EOF || true
@@ -94,7 +118,8 @@ fi
 
 systemctl --user daemon-reload
 systemctl --user enable --now clipboard-janitor.service
-say "enabled clipboard-janitor.service"
+systemctl --user enable --now flashpaste-screenshot-watcher.path
+say "enabled clipboard-janitor + flashpaste-screenshot-watcher"
 
 # ── config snippets ─────────────────────────────────────────────────
 cat <<'EOF'

@@ -1,0 +1,7 @@
+[Unit]
+Description=Pre-load the latest screenshot file into xclip (flashpaste)
+Documentation=https://github.com/NagyVikt/flashpaste
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/flashpaste-screenshot-preload.sh

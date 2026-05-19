@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch ~/Pictures/Screenshots/ and pre-load fresh PNGs into xclip (flashpaste)
+Documentation=https://github.com/NagyVikt/flashpaste
+
+[Path]
+PathChanged=%h/Pictures/Screenshots
+Unit=flashpaste-screenshot-watcher.service
+
+[Install]
+WantedBy=default.target

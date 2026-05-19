@@ -49,16 +49,44 @@ Total dispatch latency: **~120ms**, down from ~3 seconds and 4 paste-presses wit
 
 ## Quick start
 
+**One line:**
+
 ```bash
-git clone https://github.com/NagyVikt/flashpaste.git
-cd flashpaste
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/NagyVikt/flashpaste/main/bootstrap.sh | bash
+```
+
+**Or the careful version:**
+
+```bash
+git clone https://github.com/NagyVikt/flashpaste.git ~/.local/share/flashpaste
+cd ~/.local/share/flashpaste && ./install.sh
 ```
 
 The installer:
-1. Symlinks scripts into `~/.local/bin/`.
-2. Drops a systemd user service (`clipboard-janitor.service`) that reaps stuck `wl-copy` / `wl-paste` daemons.
-3. Prints the tmux + kitty config snippets you need to copy into your dotfiles.
+1. Symlinks every script into `~/.local/bin/`.
+2. Drops two systemd user services:
+   - `clipboard-janitor.service` — reaps stuck `wl-copy`/`wl-paste` daemons.
+   - `flashpaste-screenshot-watcher.path` + `.service` — fires `flashpaste-screenshot-preload.sh` the instant a new PNG lands in `~/Pictures/Screenshots/`, so xclip is "hot" before you reach for right-click.
+3. Patches `ydotoold.service` with the Ubuntu-24.04 socket-path drop-in.
+4. Prints the tmux + kitty config snippets you need to copy into your dotfiles.
+
+After install, append the snippets:
+
+```bash
+cat ~/.local/share/flashpaste/examples/tmux.conf.snippet  >> ~/.tmux.conf
+cat ~/.local/share/flashpaste/examples/kitty.conf.snippet >> ~/.config/kitty/kitty.conf
+tmux source-file ~/.tmux.conf
+# restart kitty
+```
+
+### Performance knobs
+
+| Env var | Effect |
+|---|---|
+| `FLASHPASTE_QUIET=1` | Suppresses every `log`/`clog`/`t` call. Saves ~5–15ms per dispatch. Recommended once the system is stable and you don't need timing telemetry. |
+| `FLASHPASTE_DIR` | Override the install location (default `~/.local/share/flashpaste`). |
+| `TMUX_PASTE_LOG` | Override the per-invocation log path. |
+| `CLIP_PIPELINE_LOG` | Override the structured event-log path. |
 
 ### Required dependencies
 
