@@ -29,6 +29,10 @@ When the user says "paste this screenshot into my terminal", "show this to Claud
 # Take a screenshot of an area and copy its path:
 flashpaste-shoot --interactive --print-path
 
+# Capture an area, annotate it (arrows / highlights via swappy or satty),
+# then emit the final annotated file path:
+flashpaste-shoot --interactive --annotate --print-path
+
 # Take a screenshot and immediately paste into pane %4 (e.g. another agent):
 flashpaste-shoot && sleep 0.2 && flashpaste-trigger '%4'
 
