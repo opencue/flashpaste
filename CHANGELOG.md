@@ -25,6 +25,11 @@ Release-tag policy: every `vX.Y` commit on `main` must be tagged and have a matc
 - `assets/hero-flow-light.svg` light-mode variant
 - README badges, animated SVG hero, animated tier-comparison chart, Mermaid sequence diagram, AI-assistant TL;DR block, extended FAQ, alternatives comparison
 
+## [1.22] - 2026-05-19
+
+### Fixed
+- `examples/tmux.conf.snippet`: dropped the `-O` flag from the right-click menu binding so the menu auto-dismisses on click-outside / mouse-release-outside. With `-O` the menu held the pane in modal-grab until Escape, which read as the pane being "frozen" after a right-click — most visible in TUIs that grab keystrokes (Claude Code chat input).
+
 ## [1.19] - 2026-05-19
 
 ### Fixed
