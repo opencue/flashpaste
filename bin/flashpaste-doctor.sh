@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+# flashpaste-doctor — parallel environment checks. Runs every probe in
+# the background, then collates results into a single table so the
+# total wall-clock is bounded by the slowest single check (~500ms)
+# instead of summing across them.
+#
+# Exits 0 if every required check passes, 1 otherwise. Warnings ("⚠")
+# don't fail; only critical missing pieces do.
+
+set -u
+
+GREEN='\033[1;32m'
+YELLOW='\033[1;33m'
+RED='\033[1;31m'
+DIM='\033[2m'
+RESET='\033[0m'
+
+ok()    { printf "${GREEN}✓${RESET} %-28s %s\n" "$1" "$2"; }
+warn()  { printf "${YELLOW}⚠${RESET} %-28s %s\n" "$1" "$2"; }
+fail()  { printf "${RED}✗${RESET} %-28s %s\n" "$1" "$2"; }
+hdr()   { printf "\n${DIM}── %s ──${RESET}\n" "$1"; }
+
+# Result dir — each parallel check writes one file there.
+RDIR=$(mktemp -d -t flashpaste-doctor.XXXXXX)
+trap 'rm -rf "$RDIR"' EXIT
+
+# Emit a single result row from a worker. Format: <status>\t<label>\t<msg>
+# status ∈ {ok,warn,fail}
+emit() {
+  local status=$1 label=$2 msg=$3 slot=$4
+  printf '%s\t%s\t%s\n' "$status" "$label" "$msg" >"$RDIR/$slot"
+}
+
+# ── parallel probes ────────────────────────────────────────────────
+
+# 1. Wayland session
+( if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
+    emit ok "Wayland session" "XDG_SESSION_TYPE=$XDG_SESSION_TYPE, WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-?}" 10
+  elif [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    emit warn "Wayland session" "WAYLAND_DISPLAY set but XDG_SESSION_TYPE='$XDG_SESSION_TYPE'" 10
+  else
+    emit fail "Wayland session" "not in a Wayland session (got '$XDG_SESSION_TYPE') — flashpaste is Wayland-only" 10
+  fi
+) &
+
+# 2. Compositor — is it mutter?
+( if command -v gnome-shell >/dev/null 2>&1 && pgrep -x gnome-shell >/dev/null 2>&1; then
+    ver=$(gnome-shell --version 2>/dev/null | head -c 60)
+    emit ok "GNOME Shell / mutter" "$ver" 20
+  elif pgrep -x sway >/dev/null 2>&1; then
+    emit warn "Compositor" "sway detected — flashpaste targets mutter; may work but untested" 20
+  elif pgrep -x Hyprland >/dev/null 2>&1; then
+    emit warn "Compositor" "Hyprland detected — flashpaste targets mutter; may work but untested" 20
+  else
+    emit warn "Compositor" "not GNOME Shell — flashpaste's quirk workarounds may be overkill" 20
+  fi
+) &
+
+# 3. kitty installed
+( if command -v kitty >/dev/null 2>&1; then
+    ver=$(kitty --version 2>/dev/null | head -c 40)
+    emit ok "kitty installed" "$ver" 30
+  else
+    emit fail "kitty installed" "missing — install via your package manager (apt/pacman/dnf)" 30
+  fi
+) &
+
+# 4. kitty running AND has a remote-control socket
+( sock=""
+  for sock_path in /run/user/$(id -u)/kitty-main-* /run/user/$(id -u)/kitty*; do
+    [ -S "$sock_path" ] && sock="$sock_path" && break
+  done
+  if [ -n "$sock" ]; then
+    emit ok "kitty IPC socket" "$sock" 40
+  elif pgrep -x kitty >/dev/null 2>&1; then
+    emit warn "kitty IPC socket" "kitty running but no listen socket — add 'allow_remote_control yes' + 'listen_on unix:@kitty-main-{kitty_pid}' to kitty.conf" 40
+  else
+    emit warn "kitty IPC socket" "kitty not running — start kitty before image-paste tests" 40
+  fi
+) &
+
+# 5. tmux installed and reachable
+( if command -v tmux >/dev/null 2>&1; then
+    ver=$(tmux -V 2>/dev/null | head -c 40)
+    if tmux list-sessions >/dev/null 2>&1; then
+      sess=$(tmux list-sessions 2>/dev/null | wc -l)
+      emit ok "tmux installed + running" "$ver, $sess session(s)" 50
+    else
+      emit warn "tmux installed" "$ver, but no live sessions (start one before testing)" 50
+    fi
+  else
+    emit fail "tmux installed" "missing — install tmux 3.0 or newer" 50
+  fi
+) &
+
+# 6. tmux running INSIDE kitty (the supported topology)
+( if [ -n "${TMUX:-}" ]; then
+    parent_term="${KITTY_PID:-}${TERM_PROGRAM:-}${TERM:-}"
+    if [ -n "${KITTY_WINDOW_ID:-}" ] || [ -n "${KITTY_PID:-}" ]; then
+      emit ok "tmux inside kitty" "TMUX=$TMUX, KITTY_WINDOW_ID=${KITTY_WINDOW_ID:-?}" 60
+    elif [ "${TERM:-}" = "tmux-256color" ] && command -v kitty >/dev/null 2>&1; then
+      emit warn "tmux inside kitty" "TMUX set but no KITTY_* env — may have launched tmux outside a kitty window" 60
+    else
+      emit warn "tmux inside kitty" "tmux running but not inside kitty (parent_term='$parent_term'); flashpaste works best in kitty" 60
+    fi
+  else
+    emit warn "tmux inside kitty" "not currently inside a tmux session (run inside tmux to actually test paste)" 60
+  fi
+) &
+
+# 7. wl-clipboard
+( if command -v wl-paste >/dev/null 2>&1 && command -v wl-copy >/dev/null 2>&1; then
+    ver=$(wl-paste --version 2>/dev/null | head -c 40)
+    emit ok "wl-clipboard" "$ver" 70
+  else
+    emit fail "wl-clipboard" "missing — apt install wl-clipboard" 70
+  fi
+) &
+
+# 8. xclip (XWayland fallback)
+( if command -v xclip >/dev/null 2>&1; then
+    emit ok "xclip (XWayland)" "$(xclip -version 2>&1 | head -1 | head -c 40)" 80
+  else
+    emit fail "xclip" "missing — apt install xclip (xclip is flashpaste's primary fallback when mutter is wedged)" 80
+  fi
+) &
+
+# 9. ydotool + ydotoold socket
+( if ! command -v ydotool >/dev/null 2>&1; then
+    emit fail "ydotool" "missing — apt install ydotool ydotoold" 90
+  else
+    sock="${YDOTOOL_SOCKET:-${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/.ydotool_socket}"
+    if [ -S "$sock" ]; then
+      emit ok "ydotool socket" "$sock" 90
+    elif [ -S "/tmp/.ydotool_socket" ]; then
+      emit warn "ydotool socket" "/tmp/.ydotool_socket exists but $sock missing — install.sh patches this via systemd drop-in" 90
+    else
+      emit fail "ydotool socket" "ydotool installed but ydotoold not running — systemctl --user enable --now ydotoold.service" 90
+    fi
+  fi
+) &
+
+# 10. ~/Pictures/Screenshots/ exists (for the auto-pickup path)
+( if [ -d "$HOME/Pictures/Screenshots" ]; then
+    n=$(find "$HOME/Pictures/Screenshots" -maxdepth 1 -type f -name '*.png' 2>/dev/null | wc -l)
+    emit ok "Screenshots directory" "$HOME/Pictures/Screenshots/ ($n PNG files)" 100
+  else
+    emit warn "Screenshots directory" "$HOME/Pictures/Screenshots/ doesn't exist — GNOME's PrtScr will create it on first use" 100
+  fi
+) &
+
+# 11. tmux-paste-dispatch.sh already installed?
+( if [ -x "$HOME/.local/bin/tmux-paste-dispatch.sh" ]; then
+    emit ok "flashpaste installed" "$HOME/.local/bin/tmux-paste-dispatch.sh" 110
+  else
+    emit warn "flashpaste installed" "not yet — bootstrap.sh / install.sh will fix this" 110
+  fi
+) &
+
+# 12. systemd user services
+( if systemctl --user is-active clipboard-janitor.service >/dev/null 2>&1; then
+    emit ok "clipboard-janitor.service" "running" 120
+  else
+    emit warn "clipboard-janitor.service" "not running (install.sh enables it)" 120
+  fi
+) &
+
+# 13. clipboard-poll.service must NOT be running (clobbers clipboard).
+( if systemctl --user is-active clipboard-poll.service >/dev/null 2>&1; then
+    emit fail "clipboard-poll.service" "RUNNING — this poller will clobber your clipboard. Disable with: systemctl --user disable --now clipboard-poll.service" 130
+  else
+    emit ok "clipboard-poll.service" "disabled (correct)" 130
+  fi
+) &
+
+# ── collate ────────────────────────────────────────────────────────
+wait
+
+hdr "flashpaste doctor — environment check"
+fails=0
+warns=0
+for f in $(ls "$RDIR" | sort -n); do
+  IFS=$'\t' read -r status label msg <"$RDIR/$f"
+  case "$status" in
+    ok)   ok   "$label" "$msg" ;;
+    warn) warn "$label" "$msg"; warns=$((warns + 1)) ;;
+    fail) fail "$label" "$msg"; fails=$((fails + 1)) ;;
+  esac
+done
+
+echo
+if [ "$fails" -eq 0 ] && [ "$warns" -eq 0 ]; then
+  printf "${GREEN}All checks passed.${RESET} flashpaste should work out of the box.\n"
+  exit 0
+elif [ "$fails" -eq 0 ]; then
+  printf "${YELLOW}$warns warning(s)${RESET}, no failures. flashpaste will still install; address warnings if image paste misbehaves.\n"
+  exit 0
+else
+  printf "${RED}$fails failure(s)${RESET}, $warns warning(s). Fix the ${RED}✗${RESET} items above before installing.\n"
+  exit 1
+fi

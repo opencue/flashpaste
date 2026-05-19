@@ -1,8 +1,21 @@
 # flashpaste
 
-> Sub-120ms image-paste into terminal AI agents (Claude Code, Codex, etc.) on GNOME Wayland — even when mutter's clipboard is broken.
+> Sub-120ms image-paste into terminal AI agents (Claude Code, Codex, etc.) on GNOME Wayland — even when mutter's clipboard is wedged.
 
-If you've ever tried to paste a screenshot into a TUI app running inside tmux inside kitty on GNOME 46 / mutter Wayland, you know what 15 frustrated `Ctrl+V` presses feel like. **flashpaste** is the fix.
+Don't fight the stack. **Install once, paste forever.** `PrtScr` → right-click → **Paste** → the screenshot is attached to your TUI session before you blink. No more retry-spamming Ctrl+V hoping the clipboard daemon will cooperate.
+
+flashpaste is the missing glue that makes the standard Linux terminal stack just work for image paste:
+
+| Layer | Upstream | What flashpaste plugs into it |
+|---|---|---|
+| Compositor | [GNOME / mutter](https://gitlab.gnome.org/GNOME/mutter) | Works around mutter's surfaceless-client clipboard refusal |
+| Terminal | [kitty](https://github.com/kovidgoyal/kitty) | Uses `kitty @ send-text` to bypass keybinding interception |
+| Multiplexer | [tmux](https://github.com/tmux/tmux) | Plugs into `bind -n C-v` + right-click menu without recursing on itself |
+| Clipboard | [wl-clipboard](https://github.com/bugaevc/wl-clipboard) | Shims `wl-paste` with xclip fallback + wedge cache |
+| Input synth | [ydotool](https://github.com/ReimuNotMoe/ydotool) | Auto-patches the Ubuntu 24.04 socket-path bug in 0.1.8 |
+| Screenshots | GNOME Screenshot (built-in) | A systemd `.path` unit pre-loads each new PNG into xclip the instant the file lands |
+
+If you already run **kitty + tmux on GNOME Wayland** (the standard Claude Code / Codex setup), you have everything flashpaste needs. If not, the installer will tell you exactly what to `apt install`.
 
 ## What it does
 
@@ -55,11 +68,19 @@ Total dispatch latency: **~120ms**, down from ~3 seconds and 4 paste-presses wit
 curl -fsSL https://raw.githubusercontent.com/NagyVikt/flashpaste/main/bootstrap.sh | bash
 ```
 
+The bootstrap runs the [**doctor**](bin/flashpaste-doctor.sh) first — 13 parallel environment checks (Wayland session, mutter, kitty installed, kitty IPC socket, tmux installed and running, tmux inside kitty, wl-clipboard, xclip, ydotool + socket, screenshots dir, …) so you see green/red status before anything is touched. Run it standalone anytime:
+
+```bash
+bash ~/.local/share/flashpaste/bin/flashpaste-doctor.sh
+```
+
 **Or the careful version:**
 
 ```bash
 git clone https://github.com/NagyVikt/flashpaste.git ~/.local/share/flashpaste
-cd ~/.local/share/flashpaste && ./install.sh
+cd ~/.local/share/flashpaste
+./bin/flashpaste-doctor.sh   # pre-flight check
+./install.sh
 ```
 
 The installer:

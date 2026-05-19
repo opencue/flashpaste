@@ -67,6 +67,15 @@ else
   git clone --depth=1 --quiet "$REPO" "$DEST"
 fi
 
+# ── pre-flight doctor (parallel env checks) ──────────────────────
+say "running doctor (parallel environment checks)"
+if ! bash "$DEST/bin/flashpaste-doctor.sh"; then
+  echo
+  warn "doctor reported failures. Fix the ✗ items above and re-run:"
+  echo "    bash $DEST/bootstrap.sh"
+  exit 1
+fi
+
 # ── run installer ────────────────────────────────────────────────
 say "running installer"
 bash "$DEST/install.sh"
