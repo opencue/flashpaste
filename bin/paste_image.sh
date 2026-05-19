@@ -22,10 +22,17 @@
 #               Ctrl-V byte via kitty send-text. The wl-paste shim now
 #               handles the image read transparently.
 # ─────────────────────────────────────────────────────────────────────
-# Smart paste for kitty + tmux.
+# Smart paste for kitty + tmux. Bound from kitty.conf as:
+#   map ctrl+v       launch --type=background --copy-env -- ~/paste_image.sh
+#   map ctrl+alt+v   launch --type=background --copy-env -- ~/paste_image.sh image
 #
-# Called with no args (Ctrl+V): native text paste via kitty.
-# Called with "image" arg (Ctrl+Alt+V): send raw Ctrl-V for image paste.
+# Modes:
+#   no arg    → AUTO: routes to image branch if clipboard has image,
+#               otherwise to text branch. The user just presses Ctrl+V
+#               and the right thing happens for both text AND images.
+#   "image"   → force image branch (manual override; useful when xclip
+#               disagrees with wl-paste about whether image is present)
+#   "text"    → force text branch
 set -u
 
 . /home/deadpool/.local/bin/clip-pipeline-log.sh 2>/dev/null || true
@@ -71,7 +78,24 @@ if [ -z "$sock" ]; then
 fi
 clog "paste-image" "event=socket-resolved" "sock='$sock'"
 
-if [ "${1:-}" = "image" ]; then
+# Route by intent.
+#   arg "image"  → force image branch (Ctrl+Alt+V binding, manual override)
+#   arg "text"   → force text branch
+#   no arg       → AUTO: image if clipboard has image, else text. This
+#                  makes Ctrl+V in kitty behave like the user expects:
+#                  paste whatever's on the clipboard, image or text.
+mode="${1:-auto}"
+if [ "$mode" = "auto" ]; then
+  if [ "$_has_image" = "1" ]; then
+    mode=image
+    clog "paste-image" "event=auto-route" "decision=image" "reason=clipboard-has-image"
+  else
+    mode=text
+    clog "paste-image" "event=auto-route" "decision=text" "reason=no-image-on-clipboard"
+  fi
+fi
+
+if [ "$mode" = "image" ]; then
   win="${KITTY_WINDOW_ID:-}"
   match=()
   [ -n "$win" ] && match=(--match "id:$win")
