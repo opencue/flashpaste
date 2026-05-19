@@ -21,6 +21,10 @@ use crate::Args;
 /// image stays valid until something supersedes it.
 pub const STAGED_IMAGE_TTL_SECS: u64 = 120;
 
+/// Text selections live as long as someone is owning the clipboard. Match
+/// typical desktop UX: a copy is "fresh" for the rest of the session.
+pub const STAGED_TEXT_TTL_SECS: u64 = 24 * 3600;
+
 /// Bytes of a staged image we hold in memory. PNG/JPEG range is 100KB-2MB
 /// typically; we keep the bytes so X11's SelectionRequest handler can serve
 /// them on demand without re-reading the file.
@@ -40,6 +44,43 @@ impl StagedImage {
         match self.captured_at.elapsed() {
             Ok(age) => age.as_secs() <= STAGED_IMAGE_TTL_SECS,
             Err(_) => true, // clock skewed; treat as fresh rather than drop
+        }
+    }
+}
+
+/// Bytes of a staged TEXT selection. v1.19+ — the daemon now owns text on
+/// the clipboard too, so `clipboard-set.sh` can route there instead of
+/// forking `wl-copy` (which surfaced as a phantom dock entry on every
+/// copy). Kept as raw bytes (not String) because tmux can pipe non-UTF8.
+#[derive(Debug, Clone)]
+pub struct StagedText {
+    pub bytes: Arc<Vec<u8>>,
+    pub captured_at: SystemTime,
+}
+
+impl StagedText {
+    pub fn is_fresh(&self) -> bool {
+        match self.captured_at.elapsed() {
+            Ok(age) => age.as_secs() <= STAGED_TEXT_TTL_SECS,
+            Err(_) => true,
+        }
+    }
+}
+
+/// What the daemon is currently advertising on the clipboard. At most one
+/// variant is live at a time — copying text clobbers a staged image and
+/// vice versa, mirroring how real system clipboards work.
+#[derive(Debug, Clone)]
+pub enum StagedSelection {
+    Image(StagedImage),
+    Text(StagedText),
+}
+
+impl StagedSelection {
+    pub fn is_fresh(&self) -> bool {
+        match self {
+            Self::Image(img) => img.is_fresh(),
+            Self::Text(txt) => txt.is_fresh(),
         }
     }
 }
@@ -103,11 +144,11 @@ impl DaemonConfig {
 pub struct SharedState {
     pub config: DaemonConfig,
     pub kitty_version: KittyVersion,
-    /// The currently staged image. `None` until inotify sees the first
-    /// screenshot, then `Some` for the rest of the daemon's life.
-    pub latest_image: RwLock<Option<StagedImage>>,
-    /// Channel notified every time `latest_image` is updated. Used by the
-    /// Wayland + X11 owners to refresh their selection content.
+    /// The currently staged selection. `None` until something (a screenshot
+    /// via inotify, or a text copy via the stage_text IPC) is staged.
+    pub latest_selection: RwLock<Option<StagedSelection>>,
+    /// Channel notified every time `latest_selection` is updated. Used by
+    /// the Wayland + X11 owners to refresh their selection content.
     pub stage_notifier_tx: watch::Sender<u64>,
     pub stage_notifier_rx: watch::Receiver<u64>,
     /// Recursion guard. Holds the unix-epoch millisecond timestamp of the
@@ -122,7 +163,7 @@ impl SharedState {
         Self {
             config,
             kitty_version,
-            latest_image: RwLock::new(None),
+            latest_selection: RwLock::new(None),
             stage_notifier_tx: tx,
             stage_notifier_rx: rx,
             last_paste_ms: AtomicU64::new(0),
@@ -131,25 +172,46 @@ impl SharedState {
 
     /// Replace the staged image and notify subscribers.
     pub async fn set_staged_image(&self, image: StagedImage) {
-        let revision = {
-            let mut guard = self.latest_image.write().await;
-            *guard = Some(image);
-            now_unix_ms()
-        };
-        // Best-effort: ignore send errors (no subscribers is fine).
-        let _ = self.stage_notifier_tx.send(revision);
+        self.set_staged_selection(StagedSelection::Image(image)).await;
     }
 
-    /// Snapshot the staged image (without holding the lock during use).
-    pub async fn staged_snapshot(&self) -> Option<StagedImage> {
-        self.latest_image.read().await.clone()
+    /// Replace the staged text and notify subscribers. v1.19+ — the path
+    /// through `flashpaste-trigger --stage-text` that lets `clipboard-set.sh`
+    /// avoid forking `wl-copy`.
+    pub async fn set_staged_text(&self, text: StagedText) {
+        self.set_staged_selection(StagedSelection::Text(text)).await;
+    }
+
+    /// Replace whatever's currently staged with `sel`. Either variant
+    /// clobbers the other — clipboards are a single slot.
+    pub async fn set_staged_selection(&self, sel: StagedSelection) {
+        {
+            let mut guard = self.latest_selection.write().await;
+            *guard = Some(sel);
+        }
+        // Best-effort: ignore send errors (no subscribers is fine).
+        let _ = self.stage_notifier_tx.send(now_unix_ms());
+    }
+
+    /// Snapshot the staged selection (without holding the lock during use).
+    pub async fn staged_snapshot(&self) -> Option<StagedSelection> {
+        self.latest_selection.read().await.clone()
+    }
+
+    /// Image-only convenience for the paste op (which is image-specific).
+    /// Returns `None` if nothing is staged OR if the staged item is text.
+    pub async fn staged_image(&self) -> Option<StagedImage> {
+        match self.staged_snapshot().await {
+            Some(StagedSelection::Image(img)) => Some(img),
+            _ => None,
+        }
     }
 
     /// Synchronous variant for subsystems that aren't tokio-aware (e.g. the
     /// X11 owner running on `spawn_blocking`). Uses `blocking_read` because
     /// we are guaranteed to be inside a blocking task.
-    pub fn staged_snapshot_blocking(&self) -> Option<StagedImage> {
-        self.latest_image.blocking_read().clone()
+    pub fn staged_snapshot_blocking(&self) -> Option<StagedSelection> {
+        self.latest_selection.blocking_read().clone()
     }
 }
 

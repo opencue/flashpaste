@@ -1,23 +1,36 @@
 # ── flashpaste tmux integration ────────────────────────────────────
 # Append this to ~/.tmux.conf and `tmux source-file ~/.tmux.conf`.
 
-# OSC 52 clipboard passthrough (terminal-side; harmless if your
-# terminal doesn't support it — flashpaste's wl-copy fallback covers it).
+# OSC 52 clipboard passthrough. With set-clipboard on, tmux's
+# `copy-selection-*` commands emit an OSC 52 sequence that kitty (or any
+# OSC 52-aware terminal) translates into a clipboard write through its
+# OWN already-open Wayland connection — no wl-copy fork, no phantom
+# dock entry. This is the primary clipboard-set path in v1.19+.
 set -g set-clipboard on
 
-# User options consumed by flashpaste scripts.
+# Fallback options consumed by flashpaste scripts. clipboard-set.sh is
+# only called from the explicit `copy-pipe` bindings below (currently
+# none — every copy keybinding uses copy-selection instead). It still
+# fires for shell-script invocations that pipe to @clip directly. As of
+# v1.19, clipboard-set.sh prefers the flashpasted daemon's text-staging
+# IPC over forking wl-copy, so even this fallback no longer flashes the
+# dock when the daemon is running.
 set -g @clip  '/home/$USER/.local/bin/clipboard-set.sh'
 set -g @paste '/home/$USER/.local/bin/get-clipboard-text.sh'
 
 # Mouse on — required for the right-click Paste menu.
 set -g mouse on
 
-# Copy: drag-end / y / double-click / triple-click → @clip → system clipboard.
-bind -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-pipe-no-clear "sh -c '#{@clip}'"
-bind -T copy-mode    MouseDragEnd1Pane send-keys -X copy-pipe-no-clear "sh -c '#{@clip}'"
-bind -T copy-mode-vi y send-keys -X copy-pipe-and-cancel "sh -c '#{@clip}'"
-bind -n DoubleClick1Pane select-pane \; copy-mode -M \; send-keys -X select-word \; send-keys -X copy-pipe-no-clear "sh -c '#{@clip}'"
-bind -n TripleClick1Pane select-pane \; copy-mode -M \; send-keys -X select-line \; send-keys -X copy-pipe-no-clear "sh -c '#{@clip}'"
+# Copy: drag-end / y / double-click / triple-click → OSC 52 → kitty
+# writes the system clipboard via its own Wayland connection. No
+# wl-copy fork, no clipboard-janitor SIGTERM, no "wl-clipboard"
+# entry in the Ubuntu Dock's Open Windows list. Confirmed sub-1ms
+# round-trip; tmux 3.2+ + kitty (or any OSC52-aware terminal) required.
+bind -T copy-mode-vi MouseDragEnd1Pane send-keys -X copy-selection-no-clear
+bind -T copy-mode    MouseDragEnd1Pane send-keys -X copy-selection-no-clear
+bind -T copy-mode-vi y send-keys -X copy-selection-and-cancel
+bind -n DoubleClick1Pane select-pane \; copy-mode -M \; send-keys -X select-word \; send-keys -X copy-selection-no-clear
+bind -n TripleClick1Pane select-pane \; copy-mode -M \; send-keys -X select-line \; send-keys -X copy-selection-no-clear
 
 # C-v in any normal pane → flashpaste tier-3 path. flashpaste-trigger
 # is a 5-ms Rust client that pings the flashpasted daemon over a unix

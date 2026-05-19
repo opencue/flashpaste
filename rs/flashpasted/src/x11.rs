@@ -34,7 +34,7 @@ use x11rb::rust_connection::RustConnection;
 use x11rb::wrapper::ConnectionExt as _;
 use x11rb::COPY_DEPTH_FROM_PARENT;
 
-use crate::state::{SharedState, StagedImage};
+use crate::state::{SharedState, StagedSelection};
 
 pub fn spawn_owner(state: Arc<SharedState>) {
     tokio::task::spawn_blocking(move || {
@@ -51,6 +51,11 @@ struct Atoms {
     timestamp: u32,
     image_png: u32,
     image_jpeg: u32,
+    utf8_string: u32,
+    string_atom: u32,
+    text_atom: u32,
+    text_plain: u32,
+    text_plain_utf8: u32,
     multiple: u32,
     atom_pair: u32,
 }
@@ -65,6 +70,14 @@ impl Atoms {
         let timestamp = conn.intern_atom(false, b"TIMESTAMP")?.reply()?.atom;
         let image_png = conn.intern_atom(false, b"image/png")?.reply()?.atom;
         let image_jpeg = conn.intern_atom(false, b"image/jpeg")?.reply()?.atom;
+        let utf8_string = conn.intern_atom(false, b"UTF8_STRING")?.reply()?.atom;
+        let string_atom = conn.intern_atom(false, b"STRING")?.reply()?.atom;
+        let text_atom = conn.intern_atom(false, b"TEXT")?.reply()?.atom;
+        let text_plain = conn.intern_atom(false, b"text/plain")?.reply()?.atom;
+        let text_plain_utf8 = conn
+            .intern_atom(false, b"text/plain;charset=utf-8")?
+            .reply()?
+            .atom;
         let multiple = conn.intern_atom(false, b"MULTIPLE")?.reply()?.atom;
         let atom_pair = conn.intern_atom(false, b"ATOM_PAIR")?.reply()?.atom;
         Ok(Self {
@@ -73,6 +86,11 @@ impl Atoms {
             timestamp,
             image_png,
             image_jpeg,
+            utf8_string,
+            string_atom,
+            text_atom,
+            text_plain,
+            text_plain_utf8,
             multiple,
             atom_pair,
         })
@@ -247,20 +265,28 @@ fn serve_target(
     conn: &RustConnection,
     _window: u32,
     atoms: &Atoms,
-    staged: &StagedImage,
+    staged: &StagedSelection,
     requestor: u32,
     property: u32,
     target: u32,
 ) -> Result<bool> {
     if target == atoms.targets {
-        // Respond with the list of supported targets.
+        // Respond with the list of supported targets. Composition depends
+        // on whether we're serving an image or text selection.
         let mut supported = vec![atoms.targets, atoms.timestamp];
-        // Always advertise BOTH image atoms even if the staged image is
-        // a single MIME. We hand back the staged bytes regardless of which
-        // one the requestor asks for — pasting tools that hardcode PNG
-        // shouldn't get an empty clipboard.
-        supported.push(atoms.image_png);
-        supported.push(atoms.image_jpeg);
+        match staged {
+            StagedSelection::Image(_) => {
+                supported.push(atoms.image_png);
+                supported.push(atoms.image_jpeg);
+            }
+            StagedSelection::Text(_) => {
+                supported.push(atoms.utf8_string);
+                supported.push(atoms.string_atom);
+                supported.push(atoms.text_atom);
+                supported.push(atoms.text_plain_utf8);
+                supported.push(atoms.text_plain);
+            }
+        }
         conn.change_property32(
             PropMode::REPLACE,
             requestor,
@@ -284,13 +310,22 @@ fn serve_target(
         )?;
         return Ok(true);
     }
-    if target == atoms.image_png || target == atoms.image_jpeg {
-        // Send the staged bytes as 8-bit data on the requestor's property.
-        // For images of 100KB-2MB we don't need INCR — X11 happily ships
-        // up to ~1MB per ChangeProperty under XCB. We split anyway to
-        // stay below the maximum-request-size ceiling.
-        change_property_chunked(conn, requestor, property, target, &staged.bytes)?;
-        return Ok(true);
+    if let StagedSelection::Image(img) = staged {
+        if target == atoms.image_png || target == atoms.image_jpeg {
+            change_property_chunked(conn, requestor, property, target, &img.bytes)?;
+            return Ok(true);
+        }
+    }
+    if let StagedSelection::Text(txt) = staged {
+        if target == atoms.utf8_string
+            || target == atoms.string_atom
+            || target == atoms.text_atom
+            || target == atoms.text_plain
+            || target == atoms.text_plain_utf8
+        {
+            change_property_chunked(conn, requestor, property, target, &txt.bytes)?;
+            return Ok(true);
+        }
     }
     if target == atoms.multiple {
         // MULTIPLE: the requestor wrote a list of (target, property) atom

@@ -24,7 +24,7 @@ use std::time::Duration;
 use tracing::{debug, error, info, warn};
 use wl_clipboard_rs::copy::{MimeSource, MimeType, Options, ServeRequests, Source};
 
-use crate::state::SharedState;
+use crate::state::{SharedState, StagedSelection};
 
 /// The Wayland `app_id` the daemon advertises. Combined with a NoDisplay
 /// `flashpasted.desktop` file (shipped by `install.sh` in a follow-up
@@ -58,23 +58,48 @@ async fn run_owner(state: Arc<SharedState>) {
         let Some(staged) = state.staged_snapshot().await else {
             continue;
         };
-        let bytes = staged.bytes.clone();
-        let mime = staged.mime;
-        debug!(bytes = bytes.len(), mime, "Wayland: refreshing selection");
+        let (bytes_clone, mimes): (Vec<u8>, Vec<&'static str>) = match staged {
+            StagedSelection::Image(img) => {
+                let bytes = (*img.bytes).clone();
+                debug!(bytes = bytes.len(), mime = img.mime, "Wayland: refreshing image selection");
+                // Always advertise the primary plus `image/png` alias.
+                let mut mimes = vec![img.mime];
+                if img.mime != "image/png" {
+                    mimes.push("image/png");
+                }
+                (bytes, mimes)
+            }
+            StagedSelection::Text(txt) => {
+                let bytes = (*txt.bytes).clone();
+                debug!(bytes = bytes.len(), "Wayland: refreshing text selection");
+                // The MIME types real apps query for plain text on the
+                // Wayland clipboard. Order is "best first" though Wayland
+                // doesn't actually rank; clients query by exact match.
+                (
+                    bytes,
+                    vec![
+                        "text/plain;charset=utf-8",
+                        "text/plain",
+                        "UTF8_STRING",
+                        "STRING",
+                        "TEXT",
+                    ],
+                )
+            }
+        };
 
         // Move the blocking `copy()` call to a dedicated blocking thread so
         // the executor stays responsive while the Wayland event loop runs.
         // The `wl-clipboard-rs` crate internally forks/threads its own
         // serving loop; we own the lifetime.
-        let bytes_clone = (*bytes).clone();
         let result = tokio::task::spawn_blocking(move || {
-            install_owner(&bytes_clone, mime)
+            install_owner(&bytes_clone, &mimes)
         })
         .await;
 
         match result {
             Ok(Ok(())) => {
-                debug!(mime, "Wayland: ownership installed");
+                debug!("Wayland: ownership installed");
             }
             Ok(Err(e)) => {
                 // Mutter wedge case. Don't crash — X11 owner is our backup.
@@ -90,15 +115,11 @@ async fn run_owner(state: Arc<SharedState>) {
     }
 }
 
-/// Install ourselves as the Wayland CLIPBOARD owner for `bytes` under `mime`.
-///
-/// Per wl-clipboard-rs API (v0.9): `Options::copy(source, mime)` is the
-/// one-shot helper but it doesn't fit our use case (we want to refresh).
-/// `Options::copy_multi(sources)` accepts a `Vec<MimeSource>` and serves
-/// each MIME type forever. We use that to advertise the image MIME plus
-/// an `image/png` alias so applications that hardcode that query succeed
-/// even when the file is actually JPEG.
-fn install_owner(bytes: &[u8], mime: &'static str) -> anyhow::Result<()> {
+/// Install ourselves as the Wayland CLIPBOARD owner for `bytes` advertised
+/// under every MIME in `mimes`. wl-clipboard-rs's `copy_multi` claims the
+/// selection then spawns its own serving worker; we return as soon as
+/// ownership lands.
+fn install_owner(bytes: &[u8], mimes: &[&'static str]) -> anyhow::Result<()> {
     let mut opts = Options::new();
     // foreground=false: let wl-clipboard-rs daemonize the serving thread
     // internally; our daemon process owns the connection's lifetime via
@@ -107,25 +128,15 @@ fn install_owner(bytes: &[u8], mime: &'static str) -> anyhow::Result<()> {
     // Serve unlimited receives — the whole point of this daemon.
     opts.serve_requests(ServeRequests::Unlimited);
 
-    // Always advertise the primary MIME. If it's a JPEG, also advertise
-    // `image/png` as a duplicate-bytes alias so paste readers that only
-    // ask for PNG don't get an empty clipboard. (Mutter passes through
-    // whatever MIME a reader asks for; clients that ask for PNG and get
-    // JPEG bytes typically detect the mismatch and either reject or
-    // re-decode. Either way we don't make things worse.)
     let mut seen: HashSet<&'static str> = HashSet::new();
     let mut sources: Vec<MimeSource> = Vec::new();
-    seen.insert(mime);
-    sources.push(MimeSource {
-        source: Source::Bytes(bytes.to_vec().into()),
-        mime_type: MimeType::Specific(mime.to_string()),
-    });
-    // The wl-clipboard-rs API requires owned `Vec<u8>` per source; the
-    // duplicate cost is fine — staged screenshots are 100KB-2MB.
-    if mime != "image/png" && seen.insert("image/png") {
+    for m in mimes {
+        if !seen.insert(*m) {
+            continue;
+        }
         sources.push(MimeSource {
             source: Source::Bytes(bytes.to_vec().into()),
-            mime_type: MimeType::Specific("image/png".to_string()),
+            mime_type: MimeType::Specific((*m).to_string()),
         });
     }
 
@@ -134,7 +145,7 @@ fn install_owner(bytes: &[u8], mime: &'static str) -> anyhow::Result<()> {
     opts.copy_multi(sources)?;
 
     // Smooth-out: give Mutter a few ms to register the new owner before we
-    // potentially refresh again. Without this a rapid burst of inotify
+    // potentially refresh again. Without this a rapid burst of stage
     // events could collide on the same wayland_display.
     std::thread::sleep(Duration::from_millis(10));
     Ok(())

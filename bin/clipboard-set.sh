@@ -48,6 +48,26 @@ ensure_env() {
 ensure_env
 clog "clipboard-set" "event=env-resolved" "WAYLAND_DISPLAY='${WAYLAND_DISPLAY:-}'" "DISPLAY='${DISPLAY:-}'"
 
+# ── v1.19+ daemon path ────────────────────────────────────────────
+# If flashpasted is running, stage the text into the daemon's persistent
+# Wayland + X11 selection owners. No wl-copy fork = no phantom
+# "wl-clipboard" entry in the Ubuntu Dock. The daemon serves unlimited
+# reads from in-memory bytes, exactly what the bash dispatcher's image
+# branch already relies on for screenshots.
+_sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/flashpaste.sock"
+if [ -S "$_sock" ] && command -v flashpaste-trigger >/dev/null 2>&1; then
+  clog "clipboard-set" "event=backend-chosen" "backend=flashpasted"
+  if FLASHPASTE_STAGE_FROM="clipboard-set.sh" \
+       flashpaste-trigger --stage-text <"$_tmp"; then
+    clog "clipboard-set" "event=done" "backend=flashpasted" "rc=0"
+    exit 0
+  fi
+  # Daemon refused — fall through to the wl-copy / xclip / xsel chain.
+  # This preserves the rule "clipboard MUST be set, even if the daemon
+  # is wedged" — at worst we get the v1.14 phantom-dock-icon behavior.
+  clog "clipboard-set" "event=daemon-declined" "backend=flashpasted"
+fi
+
 if [ -n "${WAYLAND_DISPLAY:-}" ] && command -v wl-copy >/dev/null 2>&1; then
   clog "clipboard-set" "event=backend-chosen" "backend=wl-copy"
   # Reap the previous wl-copy daemon this script spawned. wl-copy stays

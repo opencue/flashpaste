@@ -74,28 +74,56 @@ const READ_TIMEOUT: Duration = Duration::from_millis(150);
     about = "Trigger a paste via the flashpasted daemon (with bash fallback)."
 )]
 struct Args {
-    /// Target tmux pane id (e.g. `%4`).
-    pane: String,
+    /// Target tmux pane id (e.g. `%4`). Required for the paste op; unused
+    /// for --stage-text.
+    pane: Option<String>,
     /// Op to send. Defaults to `paste`.
     #[arg(long, default_value = "paste")]
     op: String,
     /// Force the bash fallback path (skip the daemon entirely). For debugging.
     #[arg(long)]
     force_fallback: bool,
+    /// Read stdin and stage as a TEXT selection in the daemon (v1.19+).
+    /// This is the path `clipboard-set.sh` uses to avoid forking wl-copy
+    /// (which surfaces as a phantom dock entry). On success, exits 0; on
+    /// any failure (daemon down, write error), exits non-zero so the
+    /// caller can fall back to wl-copy or another backend.
+    #[arg(long)]
+    stage_text: bool,
 }
 
 fn main() -> ! {
     let args = Args::parse();
 
-    if args.force_fallback {
-        exec_bash_fallback(&args.pane);
+    if args.stage_text {
+        // Decoupled path — no pane needed, no bash fallback. The caller
+        // (clipboard-set.sh) handles its own fallback if we exit non-zero.
+        std::process::exit(stage_text_main());
     }
 
-    match try_daemon(&args) {
-        Ok(DaemonOutcome::Handled) => std::process::exit(0),
-        Ok(DaemonOutcome::FallbackRequested) => exec_bash_fallback(&args.pane),
-        Err(_) => exec_bash_fallback(&args.pane),
+    let pane = match &args.pane {
+        Some(p) => p.clone(),
+        None => {
+            eprintln!("flashpaste-trigger: missing pane argument");
+            std::process::exit(2);
+        }
+    };
+
+    if args.force_fallback {
+        exec_bash_fallback(&pane);
     }
+
+    let paste_args = PasteArgs { pane: pane.clone(), op: args.op };
+    match try_daemon(&paste_args) {
+        Ok(DaemonOutcome::Handled) => std::process::exit(0),
+        Ok(DaemonOutcome::FallbackRequested) => exec_bash_fallback(&pane),
+        Err(_) => exec_bash_fallback(&pane),
+    }
+}
+
+struct PasteArgs {
+    pane: String,
+    op: String,
 }
 
 enum DaemonOutcome {
@@ -105,7 +133,7 @@ enum DaemonOutcome {
     FallbackRequested,
 }
 
-fn try_daemon(args: &Args) -> Result<DaemonOutcome> {
+fn try_daemon(args: &PasteArgs) -> Result<DaemonOutcome> {
     let path = socket_path();
     if !path.exists() {
         anyhow::bail!("no daemon socket at {}", path.display());
@@ -154,6 +182,127 @@ fn try_daemon(args: &Args) -> Result<DaemonOutcome> {
 
     // Daemon politely declined — fall through to bash.
     Ok(DaemonOutcome::FallbackRequested)
+}
+
+/// v1.19+: stage stdin as a text selection in the daemon. Returns the
+/// process exit code: 0 on success, non-zero so the caller (typically
+/// `clipboard-set.sh`) can fall back to a real wl-copy / xclip backend.
+///
+/// Cap stdin at 6 MB to match the daemon's MAX_REQUEST_BYTES budget.
+fn stage_text_main() -> i32 {
+    const MAX_STDIN_BYTES: usize = 6 * 1024 * 1024;
+
+    let mut buf = Vec::new();
+    let mut stdin = std::io::stdin().lock();
+    if let Err(e) = read_to_vec_bounded(&mut stdin, &mut buf, MAX_STDIN_BYTES) {
+        eprintln!("flashpaste-trigger --stage-text: read stdin: {e}");
+        return 11;
+    }
+    if buf.is_empty() {
+        // Nothing to stage; behave like success so the caller's fall-through
+        // logic doesn't double-publish an empty clipboard.
+        return 0;
+    }
+
+    let path = socket_path();
+    if !path.exists() {
+        return 12;
+    }
+
+    let stream_res = UnixStream::connect(&path);
+    let mut stream = match stream_res {
+        Ok(s) => s,
+        Err(_) => return 13,
+    };
+    stream.set_write_timeout(Some(Duration::from_millis(200))).ok();
+    stream.set_read_timeout(Some(Duration::from_millis(200))).ok();
+
+    let b64 = base64_encode(&buf);
+    let req = json!({
+        "op": "stage_text",
+        "bytes_b64": b64,
+        "from": std::env::var("FLASHPASTE_STAGE_FROM").ok(),
+    });
+    let body = match serde_json::to_vec(&req) {
+        Ok(b) => b,
+        Err(_) => return 14,
+    };
+    let len = match u32::try_from(body.len()) {
+        Ok(n) => n,
+        Err(_) => return 15,
+    };
+    if stream.write_all(&len.to_le_bytes()).is_err() || stream.write_all(&body).is_err() {
+        return 16;
+    }
+    let mut len_buf = [0u8; 4];
+    if stream.read_exact(&mut len_buf).is_err() {
+        return 17;
+    }
+    let resp_len = u32::from_le_bytes(len_buf) as usize;
+    if resp_len > 64 * 1024 {
+        return 18;
+    }
+    let mut resp_buf = vec![0u8; resp_len];
+    if stream.read_exact(&mut resp_buf).is_err() {
+        return 19;
+    }
+    let resp: Value = match serde_json::from_slice(&resp_buf) {
+        Ok(v) => v,
+        Err(_) => return 20,
+    };
+    let ok = resp.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    if ok { 0 } else { 21 }
+}
+
+/// Read up to `max` bytes from `r` into `out`. Returns an error if the
+/// stream contains more than `max` bytes.
+fn read_to_vec_bounded<R: Read>(r: &mut R, out: &mut Vec<u8>, max: usize) -> std::io::Result<()> {
+    let mut tmp = [0u8; 8192];
+    loop {
+        let n = r.read(&mut tmp)?;
+        if n == 0 {
+            return Ok(());
+        }
+        if out.len() + n > max {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("stdin exceeds {max} bytes"),
+            ));
+        }
+        out.extend_from_slice(&tmp[..n]);
+    }
+}
+
+/// Standard base64 encoder (no URL-safe variant). Avoids the `base64`
+/// crate so trigger stays minimal.
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut i = 0;
+    while i + 3 <= data.len() {
+        let n = ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8) | (data[i + 2] as u32);
+        out.push(CHARS[((n >> 18) & 0x3f) as usize] as char);
+        out.push(CHARS[((n >> 12) & 0x3f) as usize] as char);
+        out.push(CHARS[((n >> 6) & 0x3f) as usize] as char);
+        out.push(CHARS[(n & 0x3f) as usize] as char);
+        i += 3;
+    }
+    let rem = data.len() - i;
+    if rem == 1 {
+        let n = (data[i] as u32) << 16;
+        out.push(CHARS[((n >> 18) & 0x3f) as usize] as char);
+        out.push(CHARS[((n >> 12) & 0x3f) as usize] as char);
+        out.push('=');
+        out.push('=');
+    } else if rem == 2 {
+        let n = ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8);
+        out.push(CHARS[((n >> 18) & 0x3f) as usize] as char);
+        out.push(CHARS[((n >> 12) & 0x3f) as usize] as char);
+        out.push(CHARS[((n >> 6) & 0x3f) as usize] as char);
+        out.push('=');
+    }
+    out
 }
 
 /// Replace this process with the bash dispatcher. Zero overhead — the
@@ -231,9 +380,9 @@ mod tests {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         // 2000-01-01
         assert_eq!(civil_from_days(10_957), (2000, 1, 1));
-        // 2026-05-19 (today, per the spec)
-        // days_from_epoch(2026-05-19) = 20593
-        assert_eq!(civil_from_days(20_593), (2026, 5, 19));
+        // 2026-05-19 — days_from_epoch verified against Python:
+        // (date(2026,5,19) - date(1970,1,1)).days == 20592
+        assert_eq!(civil_from_days(20_592), (2026, 5, 19));
     }
 
     #[test]
@@ -244,5 +393,24 @@ mod tests {
         assert_eq!(&s[4..5], "-");
         assert_eq!(&s[10..11], "T");
         assert_eq!(&s[19..20], ".");
+    }
+
+    #[test]
+    fn base64_encode_basic() {
+        assert_eq!(base64_encode(b""), "");
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_encode(b"hello world"), "aGVsbG8gd29ybGQ=");
+    }
+
+    #[test]
+    fn base64_encode_handles_high_bytes() {
+        // Bytes 0xFE 0xFF 0x00 - non-printable, full range.
+        let s = base64_encode(&[0xFE, 0xFF, 0x00]);
+        // Decoded back should yield the same bytes; sanity-check shape.
+        assert_eq!(s.len(), 4);
+        assert!(!s.contains('='));
     }
 }

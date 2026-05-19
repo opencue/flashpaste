@@ -29,20 +29,21 @@ use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use crate::paste;
-use crate::state::{now_unix_ms, SharedState, StagedImage};
+use crate::state::{now_unix_ms, SharedState, StagedImage, StagedText};
 
 /// Recursion guard window. A `paste` op arriving within this many ms of the
 /// previous one is treated as the tmux `bind -n C-v` recursion (see fact #2
 /// in the spec) and replied as `{"ok":true,"deduped":true}`.
 const RECURSION_DEDUPE_MS: u64 = 1500;
 
-/// Cap incoming request size so a confused (or hostile) caller can't make
-/// the daemon allocate gigabytes. 16KB is more than enough for the JSON we
-/// expect; `stage` with a path is the largest realistic payload.
-const MAX_REQUEST_BYTES: u32 = 16 * 1024;
+/// Cap incoming request size. 16KB was enough when `Stage` only carried a
+/// path; `StageText` inlines the bytes (base64-encoded by the trigger) so
+/// we widen to 8MB — covers a 6MB clipboard payload comfortably. Anything
+/// larger should hit the daemon via a path field, not inline.
+const MAX_REQUEST_BYTES: u32 = 8 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "op", rename_all = "lowercase")]
+#[serde(tag = "op", rename_all = "snake_case")]
 enum Request {
     Paste {
         pane: String,
@@ -51,6 +52,14 @@ enum Request {
     },
     Stage {
         image_path: String,
+    },
+    /// v1.19+: stage raw bytes as a text selection. Payload is base64 so
+    /// the JSON envelope is safe for binary text (tmux occasionally pipes
+    /// non-UTF8). `from` is informational (e.g. "tmux:%21").
+    StageText {
+        bytes_b64: String,
+        #[allow(dead_code)]
+        from: Option<String>,
     },
     Ping,
 }
@@ -131,6 +140,7 @@ async fn handle_conn(state: Arc<SharedState>, mut stream: UnixStream) -> Result<
     let response = match req {
         Request::Paste { pane, .. } => handle_paste(&state, &pane, started).await,
         Request::Stage { image_path } => handle_stage(&state, &image_path).await,
+        Request::StageText { bytes_b64, .. } => handle_stage_text(&state, &bytes_b64).await,
         Request::Ping => json!({ "ok": true, "pong": true }),
     };
     write_response(&mut stream, &response).await?;
@@ -165,10 +175,10 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
     state.last_paste_ms.store(now, Ordering::Relaxed);
 
     // ─── Freshness check ─────────────────────────────────────────────
-    // Daemon-handled paste requires a staged image. Without one we punt
-    // back to bash, which handles the text-paste branches via terminal-
-    // specific paths.
-    let staged = match state.staged_snapshot().await {
+    // Daemon-handled paste requires a staged IMAGE. Text on the
+    // clipboard is fine — kitty's own paste_from_clipboard handles it via
+    // the tier-1 bash path — so we punt back to bash for that case too.
+    let staged = match state.staged_image().await {
         Some(img) if img.is_fresh() => img,
         Some(_) => {
             warn!("staged image too old; daemon punting to bash");
@@ -179,7 +189,7 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
             });
         }
         None => {
-            debug!("no staged image; daemon punting to bash");
+            debug!("no staged image (clipboard is empty or holds text); daemon punting to bash");
             return json!({
                 "ok": false,
                 "reason": "no-image",
@@ -204,6 +214,27 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
             })
         }
     }
+}
+
+async fn handle_stage_text(state: &Arc<SharedState>, bytes_b64: &str) -> Value {
+    let bytes = match decode_base64(bytes_b64) {
+        Ok(b) => b,
+        Err(e) => {
+            return json!({
+                "ok": false,
+                "reason": "bad-base64",
+                "detail": format!("{e:#}"),
+            });
+        }
+    };
+    let n = bytes.len();
+    let staged = StagedText {
+        bytes: Arc::new(bytes),
+        captured_at: std::time::SystemTime::now(),
+    };
+    state.set_staged_text(staged).await;
+    debug!(bytes = n, "stage_text accepted");
+    json!({ "ok": true, "staged": "text", "bytes": n })
 }
 
 async fn handle_stage(state: &Arc<SharedState>, image_path: &str) -> Value {
@@ -238,5 +269,50 @@ fn is_socket(p: &Path) -> bool {
     match std::fs::symlink_metadata(p) {
         Ok(md) => md.file_type().is_socket(),
         Err(_) => false,
+    }
+}
+
+/// Minimal standard-base64 decoder. Avoids pulling in the `base64` crate
+/// for a single hot use. Accepts whitespace + ignores `=` padding length.
+fn decode_base64(input: &str) -> anyhow::Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf: u32 = 0;
+    let mut bits: u8 = 0;
+    for ch in input.chars() {
+        let val: u32 = match ch {
+            'A'..='Z' => (ch as u32) - ('A' as u32),
+            'a'..='z' => (ch as u32) - ('a' as u32) + 26,
+            '0'..='9' => (ch as u32) - ('0' as u32) + 52,
+            '+' => 62,
+            '/' => 63,
+            '=' | '\r' | '\n' | ' ' | '\t' => continue,
+            _ => anyhow::bail!("invalid base64 char: {ch:?}"),
+        };
+        buf = (buf << 6) | val;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1u32 << bits) - 1;
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decodes_basic_base64() {
+        assert_eq!(decode_base64("aGVsbG8=").unwrap(), b"hello");
+        assert_eq!(decode_base64("aGVsbG8gd29ybGQ=").unwrap(), b"hello world");
+        assert_eq!(decode_base64("").unwrap(), Vec::<u8>::new());
+    }
+
+    #[test]
+    fn ignores_whitespace_and_padding() {
+        assert_eq!(decode_base64("aGVs\nbG8=").unwrap(), b"hello");
+        assert_eq!(decode_base64("aGVsbG8 ").unwrap(), b"hello");
     }
 }
