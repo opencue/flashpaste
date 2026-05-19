@@ -24,3 +24,6 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 wl-clipboard-rs = { workspace = true }
 x11rb = { workspace = true }
+# Auto-compress on the screenshot-staging path so a 12 MB 4K capture
+# doesn't blow past Claude's attachment ceiling.
+flashpaste-common = { workspace = true }

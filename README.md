@@ -322,6 +322,35 @@ flashpaste-shoot --print-path    # write PNG path to stdout for shell compositio
 flashpaste-shoot --no-daemon     # skip daemon stage, just drop on disk
 ```
 
+### Auto-compress & OCR
+
+Three quality-of-life flags layered on top of capture. None of them block the fast path — capture still hits the daemon in ~250 ms; OCR and annotation are opt-in post-processors.
+
+```bash
+# Capture, extract text via tesseract, print both:
+flashpaste-shoot --print-path --ocr
+# prints:
+#   /home/you/Pictures/Screenshots/flashpaste-shoot-1716106800.png
+#
+#   The OCR'd text from the screenshot...
+
+# Re-OCR the most recent screenshot (within the last 60 s) without taking a new one:
+flashpaste-shoot --ocr-only | wl-copy
+
+# Capture an area, hand it to swappy / satty for arrows & highlights,
+# then copy the final annotated path to the clipboard:
+flashpaste-shoot --interactive --annotate --print-path
+```
+
+**OCR** uses `tesseract` if it's on `$PATH`; otherwise the capture still succeeds and we log a one-line warning on stderr. Install with `apt install tesseract-ocr` (plus optional language packs like `tesseract-ocr-deu`). **Annotate** prefers `swappy` (GNOME-native), falls back to `satty`, then falls through if neither is installed.
+
+**Auto-compress** is automatic and runs inside the daemon on the inotify-staging path: when a screenshot lands in `~/Pictures/Screenshots/`, the daemon checks its size and — only if it exceeds the cap — re-encodes it to WebP at quality 80 (or JPEG 85 if the WebP encoder errors out). The compressed sibling is written next to the original with a `.fpc.webp` / `.fpc.jpg` suffix; the original PNG is never destroyed. This keeps the bytes that flow into Claude under the attachment ceiling without sacrificing the on-disk archive.
+
+| Env var | Effect | Default |
+|---|---|---|
+| `FLASHPASTE_MAX_BYTES` | Auto-compress kicks in for files larger than this. | `4194304` (4 MB) |
+| `FLASHPASTE_MAX_DIM` | Longest side after the auto-downscale step. | `2400` |
+
 ### Repo layout
 
 ```

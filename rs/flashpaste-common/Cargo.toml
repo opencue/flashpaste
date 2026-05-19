@@ -18,6 +18,13 @@ nix = { workspace = true }
 once_cell = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tracing = { workspace = true }
+# Image compression for the auto-attach path (`compress::compress_for_attach`).
+# Default features stripped down to PNG + JPEG + WebP — the only formats
+# screenshots ever come in as. Anything else and we'd pay an extra ~2s
+# of build time per consumer of this crate.
+image = { workspace = true }
+webp = { workspace = true }
 # NOTE: x11rb is NOT used directly in flashpaste-common — the X11
 # selection event loop lives in the dispatch binary (re-exec target).
 # The library only exposes `clipboard::stage_image`, which spawns the

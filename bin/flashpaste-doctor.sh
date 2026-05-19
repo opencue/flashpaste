@@ -173,6 +173,25 @@ emit() {
   fi
 ) &
 
+# 14. tesseract — OPTIONAL; powers `flashpaste-shoot --ocr` and --ocr-only.
+( if command -v tesseract >/dev/null 2>&1; then
+    ver=$(tesseract --version 2>&1 | head -1 | head -c 40)
+    emit ok "tesseract installed" "$ver" 140
+  else
+    emit warn "tesseract installed" "missing — apt install tesseract-ocr (optional; only used for --ocr / --ocr-only)" 140
+  fi
+) &
+
+# 15. swappy / satty — OPTIONAL; either one powers `flashpaste-shoot --annotate`.
+( if command -v swappy >/dev/null 2>&1; then
+    emit ok "annotate editor" "swappy ($(command -v swappy))" 150
+  elif command -v satty >/dev/null 2>&1; then
+    emit ok "annotate editor" "satty ($(command -v satty))" 150
+  else
+    emit warn "annotate editor" "neither swappy nor satty on PATH — --annotate falls back to raw capture (apt install swappy)" 150
+  fi
+) &
+
 # ── collate ────────────────────────────────────────────────────────
 wait
 
