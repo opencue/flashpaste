@@ -27,7 +27,7 @@ set -u
 if [ -t 1 ]; then
   CYN=$'\e[36m' YEL=$'\e[33m' MAG=$'\e[35m' DIM=$'\e[2m' OFF=$'\e[0m' BOLD=$'\e[1m'
 else
-  CYN= YEL= MAG= DIM= OFF= BOLD=
+  CYN='' YEL='' MAG='' DIM='' OFF='' BOLD=''
 fi
 
 # ── defaults ─────────────────────────────────────────────────────────────
