@@ -26,107 +26,74 @@ pub async fn select_pane(pane: &str) {
         .await;
 }
 
-/// If `pane` is in copy-mode, exit it. Copy-mode swallows every byte
+/// Snapshot of the pane attributes the paste path needs before dispatching.
+/// One `tmux display` fork per dispatch instead of two (was: separate calls
+/// for `#{pane_mode}` and `#{pane_current_command}`).
+#[derive(Debug, Clone, Default)]
+pub struct PaneSnapshot {
+    pub mode: String,
+    pub current_command: String,
+}
+
+impl PaneSnapshot {
+    pub fn is_copy_mode(&self) -> bool {
+        self.mode == "copy-mode"
+    }
+}
+
+/// One-shot tmux call that grabs `pane_mode` + `pane_current_command`. The
+/// `|` separator is safe — neither field can contain a literal `|` in
+/// practice (mode is one of a fixed enum, current_command is a basename).
+pub async fn pane_snapshot(pane: &str) -> PaneSnapshot {
+    let out = Command::new("tmux")
+        .args(["display", "-t", pane, "-p", "#{pane_mode}|#{pane_current_command}"])
+        .output()
+        .await;
+    let Ok(out) = out else { return PaneSnapshot::default() };
+    let s = String::from_utf8_lossy(&out.stdout);
+    let s = s.trim();
+    let (mode, cmd) = match s.split_once('|') {
+        Some((m, c)) => (m.trim().to_string(), c.trim().to_string()),
+        None => (String::new(), s.to_string()),
+    };
+    PaneSnapshot { mode, current_command: cmd }
+}
+
+/// If the snapshot says copy-mode, exit it. Copy-mode swallows every byte
 /// including the \026 we synthesize via kitty `send_text`, so paste appears
 /// to do nothing — and Ctrl-C/Ctrl-V also stop working from the user's
 /// perspective. Mouse-wheel scrolling auto-enters copy-mode on most tmux
-/// setups, so this trap is easy to hit silently. Best-effort: a non-zero
-/// exit ("not in a mode") is fine.
-pub async fn cancel_copy_mode_if_active(pane: &str) {
-    let out = Command::new("tmux")
-        .args(["display", "-t", pane, "-p", "#{pane_mode}"])
-        .output()
-        .await;
-    let Ok(out) = out else { return };
-    let mode = String::from_utf8_lossy(&out.stdout);
-    if mode.trim() == "copy-mode" {
-        let _ = Command::new("tmux")
+/// setups, so this trap is easy to hit silently.
+pub async fn cancel_copy_mode_if_active(pane: &str, snap: &PaneSnapshot) {
+    if snap.is_copy_mode() {
+        let status = Command::new("tmux")
             .args(["send-keys", "-t", pane, "-X", "cancel"])
             .status()
             .await;
-        tracing::info!(pane, "exited copy-mode before dispatch");
-    }
-}
-
-/// True if the pane's running command looks like Claude Code AND the TUI
-/// is currently generating a response. Detected by scanning the rendered
-/// pane for the live token-counter line (e.g. `↓ 948 tokens` or
-/// `↓ 4.6k tokens`) which only appears during generation. Used by
-/// `wait_for_pane_idle` so we don't lose pastes to the TUI's input freeze.
-async fn claude_is_busy(pane: &str) -> bool {
-    let cmd_out = Command::new("tmux")
-        .args(["display", "-t", pane, "-p", "#{pane_current_command}"])
-        .output()
-        .await;
-    if let Ok(out) = cmd_out {
-        let cmd = String::from_utf8_lossy(&out.stdout);
-        let cmd = cmd.trim();
-        // claude-code TUI runs under `claude` or `node` depending on build.
-        // Bare shells / other apps: skip the wait entirely.
-        if cmd != "claude" && cmd != "node" {
-            return false;
-        }
-    }
-    let cap = Command::new("tmux")
-        .args(["capture-pane", "-t", pane, "-pS", "-10"])
-        .output()
-        .await;
-    let Ok(cap) = cap else { return false };
-    let text = String::from_utf8_lossy(&cap.stdout);
-    // Match `<num>[<unit>] tokens` somewhere in the recent visible lines.
-    // The live indicator is the only place this pattern appears.
-    text.lines().any(line_has_token_counter)
-}
-
-fn line_has_token_counter(line: &str) -> bool {
-    // Find an occurrence of " tokens" preceded (skipping whitespace and
-    // one optional unit char like k/K/M) by an ASCII digit.
-    let lower = line.as_bytes();
-    let needle = b" tokens";
-    let mut i = 0;
-    while i + needle.len() <= lower.len() {
-        if &lower[i..i + needle.len()] == needle {
-            // Walk back, skipping optional unit suffix, looking for a digit.
-            let mut j = i;
-            while j > 0 && matches!(lower[j - 1], b'k' | b'K' | b'M' | b'.' | b' ') {
-                j -= 1;
+        match status {
+            Ok(s) if s.success() => {
+                tracing::warn!(
+                    pane,
+                    "copy-mode was active — cancelled before paste \
+                     (mouse wheel auto-enters copy-mode and swallows paste bytes)"
+                );
             }
-            if j > 0 && lower[j - 1].is_ascii_digit() {
-                return true;
+            Ok(s) => {
+                tracing::warn!(
+                    pane,
+                    exit = ?s,
+                    "tried to cancel copy-mode but tmux returned non-zero"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    pane,
+                    error = %e,
+                    "failed to exec `tmux send-keys -X cancel` — paste byte will be eaten"
+                );
             }
         }
-        i += 1;
     }
-    false
-}
-
-/// Block until the Claude TUI is idle (or `timeout` elapses). Claude's TUI
-/// does not process keyboard input — including the \026 byte we inject via
-/// kitty `send_text` — while it's mid-generation. Without this wait, every
-/// paste pressed during generation gets dropped silently. The user's
-/// contract is "paste always works": this is how we honour it.
-///
-/// Polls every 200 ms; gives up after `timeout` and dispatches anyway so a
-/// detector false-negative doesn't hang the daemon forever.
-pub async fn wait_for_pane_idle(pane: &str, timeout: Duration) {
-    let start = std::time::Instant::now();
-    let mut waited = false;
-    while start.elapsed() < timeout {
-        if !claude_is_busy(pane).await {
-            if waited {
-                tracing::info!(pane, elapsed_ms = start.elapsed().as_millis() as u64,
-                    "Claude TUI became idle — dispatching queued paste");
-            }
-            return;
-        }
-        if !waited {
-            tracing::info!(pane, "Claude TUI busy — holding paste until idle");
-            waited = true;
-        }
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    tracing::warn!(pane, timeout_ms = timeout.as_millis() as u64,
-        "wait_for_pane_idle: timed out, dispatching anyway");
 }
 
 /// `tmux unbind -n C-v` — must run BEFORE kitty `send_text \026` or tmux's

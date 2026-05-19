@@ -6,7 +6,7 @@
 //! clipboard owners + paste dispatcher read.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -157,13 +157,38 @@ pub struct SharedState {
     /// last `paste` op the daemon handled. A new paste op within 1500ms is
     /// rejected as deduped (replies `{"ok":true,"deduped":true}`).
     pub last_paste_ms: AtomicU64,
-    /// True while a paste dispatch is in flight (including the
-    /// `wait_for_pane_idle` hold). Subsequent paste requests during that
-    /// window dedupe immediately instead of stacking — without this guard,
-    /// 4–5 presses while Claude is mid-generation each spawn their own
-    /// wait task and all dispatch \026 simultaneously when Claude becomes
-    /// idle.
+    /// True while a paste dispatch is in flight. Subsequent paste requests
+    /// during that window dedupe immediately (they're absorbed and replayed
+    /// once at completion) instead of stacking — without this guard, a
+    /// rapid double-click on the right-click → Paste menu would fire two
+    /// \026 bytes in quick succession and Claude could interpret them as
+    /// two pastes. The window used to be up to 30 s while the v1.23
+    /// `wait_for_pane_idle` hold ran; v1.24 dropped the wait, so the
+    /// window is now ~10–20 ms (just the dispatch itself) — still useful
+    /// for double-click deduplication.
     pub paste_in_flight: AtomicBool,
+    /// Count of paste requests that arrived while a dispatch was already
+    /// in flight (saturating at u8::MAX). The in-flight task drains this
+    /// at completion and re-dispatches ONCE if it was non-zero — so N
+    /// presses during one generation collapse to one extra image attach,
+    /// not N. (User contract: "I press paste N times → one image lands".
+    /// Watcher reported this was the biggest remaining UX issue.)
+    pub pending_paste: AtomicU8,
+    /// Pane id of the MOST RECENT press absorbed by `pending_paste`. The
+    /// replay dispatch uses this so a press to pane B during pane A's
+    /// in-flight dispatch goes to B (not A). Without this, the absorbed
+    /// press for B was silently lost: watcher caught it as
+    /// "absorbed-press pane=%38 → replay pane=%41 (wrong pane)".
+    /// `std::sync::Mutex` is fine — the critical section is a `String`
+    /// swap, hundreds of nanoseconds; we never await while holding it.
+    pub pending_pane: std::sync::Mutex<Option<String>>,
+    /// `captured_at` (ms since epoch) of the image that we last asked the
+    /// Wayland + X11 owners to claim via the stage notifier. If the next
+    /// paste's staged image has the same id we skip the notifier send and
+    /// the 8 ms post-reassert sleep — saves ~10 ms on the common "paste
+    /// the same screenshot twice" path and avoids the X11
+    /// SetSelectionOwner storm watcher flagged.
+    pub last_claim_request_image_ms: AtomicU64,
 }
 
 impl SharedState {
@@ -177,6 +202,9 @@ impl SharedState {
             stage_notifier_rx: rx,
             last_paste_ms: AtomicU64::new(0),
             paste_in_flight: AtomicBool::new(false),
+            pending_paste: AtomicU8::new(0),
+            pending_pane: std::sync::Mutex::new(None),
+            last_claim_request_image_ms: AtomicU64::new(0),
         }
     }
 

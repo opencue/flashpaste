@@ -101,7 +101,18 @@ pub async fn spawn_listener(state: Arc<SharedState>) -> Result<JoinHandle<()>> {
                     let state = state.clone();
                     tokio::spawn(async move {
                         if let Err(e) = handle_conn(state, stream).await {
-                            warn!(error = %e, "IPC connection error");
+                            // EPIPE is the normal case for the queued-paste
+                            // path: we reply `{"queued":true}` synchronously,
+                            // then dispatch detached. If the trigger closed
+                            // before we finished writing the reply, that's
+                            // its 150 ms READ_TIMEOUT — not a bug. Demote so
+                            // it doesn't pollute the WARN stream.
+                            let msg = e.to_string();
+                            if msg.contains("Broken pipe") || msg.contains("os error 32") {
+                                debug!(error = %e, "IPC connection closed by client (likely trigger read timeout)");
+                            } else {
+                                warn!(error = %e, "IPC connection error");
+                            }
                         }
                     });
                 }
@@ -166,10 +177,13 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
     let now = now_unix_ms();
     let last = state.last_paste_ms.load(Ordering::Relaxed);
     if now.saturating_sub(last) < RECURSION_DEDUPE_MS {
-        // INFO not DEBUG: this fires every paste (the recursive C-v echo
-        // is normal) and v1.20 user-reported "right-click Paste does
-        // nothing" debugging needs this visible in journalctl.
-        info!(
+        // DEBUG (was INFO until perf audit 2026-05-19): the recursive
+        // C-v echo from kitty send-text generates ~10 of these per real
+        // paste and was flooding journald with no diagnostic value.
+        // Switched to debug! so the line stays available under
+        // RUST_LOG=debug but doesn't dominate INFO traffic. Keep the
+        // payload identical so existing logfile parsers still match.
+        debug!(
             pane,
             delta_ms = now - last,
             "paste: dedupe — within recursion window (this is normal for the C-v echo back from kitty send-text)"
@@ -179,20 +193,6 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
     // Race-tolerant: store before doing the work so a recursive call's
     // load sees the new timestamp.
     state.last_paste_ms.store(now, Ordering::Relaxed);
-
-    // In-flight guard: while a dispatch is waiting on Claude to become
-    // idle, additional paste presses must not spawn parallel dispatches
-    // — otherwise 4 queued presses all fire \026 simultaneously when
-    // Claude unblocks (observed in journalctl with elapsed_ms=1853,
-    // 7600, 16245, 26733 all dispatching within a single second). Skip
-    // here; the actively-waiting dispatch will serve the user's intent.
-    if state
-        .paste_in_flight
-        .swap(true, Ordering::AcqRel)
-    {
-        info!(pane, "paste: another dispatch in flight — dropping duplicate");
-        return json!({ "ok": true, "deduped": true, "reason": "in-flight" });
-    }
 
     // ─── Freshness check ─────────────────────────────────────────────
     // Daemon-handled paste requires a staged IMAGE. Text on the
@@ -221,22 +221,168 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
         }
     };
 
-    // ─── Dispatch ────────────────────────────────────────────────────
-    match paste::dispatch_image_paste(state.clone(), pane.to_string(), staged).await {
-        Ok(()) => json!({
-            "ok": true,
-            "latency_ms": started.elapsed().as_millis() as u64,
-        }),
-        Err(e) => {
-            error!(error = ?e, "paste dispatch failed; punting to bash");
-            json!({
-                "ok": false,
-                "reason": "dispatch-failed",
-                "fallback": "bash",
-                "detail": format!("{e:#}"),
-            })
+    // ─── In-flight guard ─────────────────────────────────────────────
+    // While a dispatch is waiting on Claude to become idle, additional
+    // paste presses must not spawn parallel dispatches — otherwise N
+    // queued presses all fire \026 simultaneously when Claude unblocks
+    // (observed in journalctl: elapsed_ms=1853, 7600, 16245, 26733 all
+    // dispatching within a single second). Acquire here, after we know
+    // we'll dispatch (past the punt-to-bash branches).
+    //
+    // Queue collapse: if already in-flight, BUMP `pending_paste` (the
+    // detached task drains it at completion and replays once) instead
+    // of dropping. Net effect: N user presses during one Claude
+    // generation collapse to ONE extra image attach at the end, not N.
+    if state.paste_in_flight.swap(true, Ordering::AcqRel) {
+        let prev = state.pending_paste.fetch_add(1, Ordering::AcqRel);
+        // Saturate at u8::MAX; over 200 presses without dispatch is
+        // pathological and we don't want to wrap to 0.
+        if prev == u8::MAX {
+            state.pending_paste.store(u8::MAX, Ordering::Release);
         }
+        // Remember the MOST RECENT pane that absorbed a press so the
+        // replay dispatches there (not back to whichever pane started
+        // the in-flight dispatch). Watcher caught the silent-loss bug:
+        // press to A starts dispatch → press to B absorbed → replay
+        // went to A and B's intent was dropped.
+        if let Ok(mut guard) = state.pending_pane.lock() {
+            *guard = Some(pane.to_string());
+        }
+        info!(
+            pane,
+            pending = prev.saturating_add(1),
+            "paste: in-flight dispatch absorbed this press — will replay once at completion"
+        );
+        return json!({
+            "ok": true,
+            "queued": true,
+            "reason": "in-flight-coalesced",
+            "pending": prev.saturating_add(1) as u64,
+        });
     }
+
+    // ─── Dispatch (detached) ─────────────────────────────────────────
+    // Reply "queued" immediately and run the dispatch on a detached task
+    // that releases the in-flight flag on completion. Inline awaiting
+    // was added historically because the v1.23 `wait_for_pane_idle` hold
+    // could block up to 30 s and exceed the trigger's read timeout —
+    // surfacing as `Broken pipe (os error 32)` when we eventually
+    // replied. v1.24 dropped the wait, so dispatches now run ~10–20 ms;
+    // detaching is no longer required for liveness, but we keep it so
+    // the in-flight + pending_paste replay path stays unchanged.
+    //
+    // Replay loop: after each dispatch we drain `pending_paste`; if any
+    // presses were absorbed during the wait, replay ONCE with the
+    // latest staged image. The race window between "drain pending" and
+    // "release in_flight" is plugged by a re-check + try-reacquire.
+    let state_for_task = state.clone();
+    let initial_pane = pane.to_string();
+    tokio::spawn(async move {
+        let mut current_staged = staged;
+        let mut current_pane = initial_pane.clone();
+        loop {
+            let result = paste::dispatch_image_paste(
+                state_for_task.clone(),
+                current_pane.clone(),
+                current_staged,
+            )
+            .await;
+            if let Err(e) = result {
+                error!(error = ?e, pane = %current_pane, "paste dispatch failed (detached)");
+            }
+            // Drain any presses that arrived during the dispatch.
+            let absorbed = state_for_task
+                .pending_paste
+                .swap(0, Ordering::AcqRel);
+            if absorbed == 0 {
+                // Release the flag, then re-check pending to catch the
+                // tiny race where a press arrives between our swap and
+                // the release.
+                state_for_task
+                    .paste_in_flight
+                    .store(false, Ordering::Release);
+                let late = state_for_task.pending_paste.swap(0, Ordering::AcqRel);
+                if late == 0 {
+                    return;
+                }
+                // A late press snuck in. Try to re-acquire the flag.
+                if state_for_task
+                    .paste_in_flight
+                    .swap(true, Ordering::AcqRel)
+                {
+                    // Someone else already grabbed it; they'll handle
+                    // the press. Done.
+                    info!(
+                        pane = %current_pane,
+                        absorbed = late,
+                        "queue-collapse: late press handed off to next dispatcher"
+                    );
+                    return;
+                }
+                info!(
+                    pane = %current_pane,
+                    absorbed = late,
+                    "queue-collapse: late press caught after release — replaying"
+                );
+            } else {
+                info!(
+                    pane = %current_pane,
+                    absorbed,
+                    "queue-collapse: replaying once for absorbed presses"
+                );
+            }
+            // The replay must dispatch to the LATEST pane that absorbed a
+            // press — not to the pane that started the original dispatch.
+            // Otherwise pasting to pane A then quickly to pane B during
+            // A's wait would silently drop B's intent. See watcher report
+            // 2026-05-19 ("absorbed-press pane=%38 → replay pane=%41").
+            let replay_pane = state_for_task
+                .pending_pane
+                .lock()
+                .ok()
+                .and_then(|mut g| g.take());
+            if let Some(target) = replay_pane {
+                if target != current_pane {
+                    info!(
+                        from_pane = %current_pane,
+                        to_pane = %target,
+                        "queue-collapse: replay re-targeted to most-recent pane"
+                    );
+                }
+                current_pane = target;
+            }
+            // Fetch the latest staged image for the replay (might be a
+            // newer screenshot the user took during the wait).
+            match state_for_task.staged_image().await {
+                Some(img) if img.is_fresh() => current_staged = img,
+                Some(_) => {
+                    warn!(
+                        pane = %current_pane,
+                        "queue-collapse: staged image went stale during replay — dropping"
+                    );
+                    state_for_task
+                        .paste_in_flight
+                        .store(false, Ordering::Release);
+                    return;
+                }
+                None => {
+                    warn!(
+                        pane = %current_pane,
+                        "queue-collapse: no staged image at replay time — dropping"
+                    );
+                    state_for_task
+                        .paste_in_flight
+                        .store(false, Ordering::Release);
+                    return;
+                }
+            }
+        }
+    });
+    json!({
+        "ok": true,
+        "queued": true,
+        "ack_ms": started.elapsed().as_millis() as u64,
+    })
 }
 
 async fn handle_stage_text(state: &Arc<SharedState>, bytes_b64: &str) -> Value {

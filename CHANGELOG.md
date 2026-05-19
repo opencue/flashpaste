@@ -26,6 +26,21 @@ Release-tag policy: every `vX.Y` commit on `main` must be tagged and have a matc
 - `assets/hero-flow-light.svg` light-mode variant
 - README badges, animated SVG hero, animated tier-comparison chart, Mermaid sequence diagram, AI-assistant TL;DR block, extended FAQ, alternatives comparison
 
+## [1.24] - 2026-05-19
+
+### Removed
+
+- `wait_for_pane_idle` in `rs/flashpasted/src/tmux.rs` (and the `claude_is_busy` / `line_has_token_counter` helpers + the `FLASHPASTE_PANE_IDLE_TIMEOUT_MS` env knob in `paste.rs`). The v1.23 idea was to detect Claude generating via the live `↓ N tokens` indicator and hold the dispatch until idle; empirically the detector matched any scrollback line containing `<digit> tokens` (chat history, release notes, "Saved 200 tokens", etc.), so it timed out on every press into a Claude pane and added the full timeout (5 s default after the v1.23 30 s → 5 s tweak) as pure latency. Confirmed in journalctl: `ms_idle_wait=5097`, `ms_idle_wait=5145` back-to-back on `pane=%41`. Dispatches now fire immediately; if the TUI drops the byte the user retries, which is far cheaper than 5 s of guaranteed hang.
+
+### Kept
+
+- The `paste_in_flight` + `pending_paste` dedup in `state.rs` / `ipc.rs` stays. With the wait gone its window shrinks from "up to 30 s" to "~10–20 ms" (just the dispatch itself) but it's still useful for absorbing a rapid double-click on the right-click → Paste menu so Claude sees one `\026` instead of two.
+
+### Changed
+
+- The in-flight dedup is now **pane-aware**. `state.rs` adds a `pending_pane: Mutex<Option<String>>` that records the most recent absorbed pane id; the replay dispatch reads it and targets the saved pane instead of always replaying to the pane the initial dispatch was running on. Watcher had caught the cross-pane bug as "absorbed-press pane=%38 → replay pane=%41 (wrong pane)."
+- `ipc.rs` demotes `Broken pipe (os error 32)` on the IPC accept path from `WARN` to `DEBUG`. That's the trigger's 150 ms read timeout closing the socket before we finish writing the queued-paste reply — expected behaviour, not a bug, but it was polluting the WARN stream.
+
 ## [1.23] - 2026-05-19
 
 ### Added
