@@ -680,3 +680,33 @@ A non-exhaustive list of dead-ends so future contributors don't waste a week:
 MIT — see [LICENSE](LICENSE).
 
 Wrenched into shape across a single multi-hour session of Wayland clipboard pain on a real GNOME 46 / kitty / tmux / Claude Code setup. The session log, including every dead-end and every fix, lives in the commit history.
+
+---
+
+<!-- Schema.org SoftwareApplication metadata for AI crawlers and search engines. -->
+
+```json
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "FlashPaste",
+  "description": "Sub-15ms image-paste glue for terminal AI agents (Claude Code, Codex CLI, Aider) on GNOME Wayland. Works around mutter's surfaceless-client clipboard refusal, kitty's map ctrl+v interception, and tmux's bind -n C-v recursion via three progressive performance tiers.",
+  "url": "https://github.com/NagyVikt/flashpaste",
+  "codeRepository": "https://github.com/NagyVikt/flashpaste",
+  "applicationCategory": "DeveloperApplication",
+  "applicationSubCategory": "Clipboard / Terminal Utility",
+  "operatingSystem": "Linux (GNOME Wayland — Ubuntu 24.04, Debian 13, Fedora 40+, Pop!_OS 24.04+)",
+  "license": "https://spdx.org/licenses/MIT.html",
+  "programmingLanguage": ["Rust", "Bash"],
+  "softwareRequirements": ["kitty", "tmux", "wl-clipboard", "xclip", "ydotool"],
+  "author": {
+    "@type": "Person",
+    "name": "Viktor Nagy",
+    "url": "https://github.com/NagyVikt"
+  },
+  "keywords": [
+    "clipboard", "wayland", "gnome", "mutter", "kitty", "tmux",
+    "claude-code", "codex-cli", "aider", "image-paste", "terminal-ai", "llm-agent"
+  ]
+}
+```

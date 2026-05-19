@@ -285,21 +285,26 @@ if [ "$_early_loaded" = "1" ]; then
       fi
       ;;
     *)
-      # GNOME Terminal / VTE — ydotool ctrl+v
-      if command -v ydotool >/dev/null 2>&1; then
-        export YDOTOOL_SOCKET="${YDOTOOL_SOCKET:-$XDG_RUNTIME_DIR/.ydotool_socket}"
-        if [ -S "$YDOTOOL_SOCKET" ]; then
-          tmux unbind -n C-v 2>>"$LOG"
-          ydotool key ctrl+v 2>>"$LOG"
-          clog "paste-dispatch" "event=fast-path-done" "transport=ydotool" "mime='$_early_mime'"
-          log "FAST PATH: ydotool ctrl+v done"
-          setsid -f sh -c '
-            sleep 0.1
-            tmux bind -n C-v run-shell -b "TMUX_PASTE_TRIGGER=ctrl-v /home/deadpool/.local/bin/tmux-paste-dispatch.sh '\''#{pane_id}'\''"
-          ' </dev/null >/dev/null 2>&1
-          exit 0
-        fi
-      fi
+      # GNOME Terminal / VTE — IMAGE PASTE FAST PATH.
+      # v1.21: tmux send-keys writes the raw Ctrl-V byte (\026) directly
+      # into the pane's pty. The TUI app (Claude Code) reads it from
+      # stdin and triggers its image-paste handler, which then calls
+      # wl-paste -t image/png (our shim falls back to xclip). This
+      # bypasses two failure modes ydotool hit on this stack:
+      #   1. The right-click `display-menu` is modal — it captures every
+      #      keystroke until dismissed, so an OS-level ydotool ctrl+v
+      #      gets eaten before the host terminal can see it. (Bug
+      #      reproduced repeatedly when user reported "menu Paste does
+      #      nothing".)
+      #   2. tmux's `bind -n C-v` would recurse on a ydotool keystroke,
+      #      requiring unbind/rebind theatrics. send-keys writes to the
+      #      pty AFTER the keytable layer, so no recursion to guard.
+      log "image FAST PATH (GNOME Terminal): tmux send-keys C-v -> $pane"
+      tmux send-keys -t "$pane" C-v 2>>"$LOG"
+      rc=$?
+      log "tmux send-keys C-v exit=$rc"
+      clog "paste-dispatch" "event=fast-path-done" "transport=tmux-send-keys-cv" "mime='$_early_mime'"
+      exit 0
       ;;
   esac
 fi
@@ -569,19 +574,19 @@ if [ "$has_image" -eq 1 ]; then
       log "image-paste branch (kitty): no socket → falling through to ydotool"
       ;;
   esac
-  # Non-kitty host: ydotool 0.1.8 ctrl+v. The kitty Ctrl+V keybind
-  # interception doesn't apply outside kitty.
-  if command -v ydotool >/dev/null 2>&1; then
-    export YDOTOOL_SOCKET="${YDOTOOL_SOCKET:-$XDG_RUNTIME_DIR/.ydotool_socket}"
-    log "image-paste branch (ydotool): socket='$YDOTOOL_SOCKET'"
-    if [ -S "$YDOTOOL_SOCKET" ]; then
-      ydotool key ctrl+v 2>>"$LOG"
-      rc=$?
-      log "ydotool key ctrl+v exit=$rc"
-      clog "paste-dispatch" "event=image-ctrlv-sent" "transport=ydotool" "rc=$rc"
-      exit 0
-    fi
-  fi
+  # Non-kitty host: v1.21 — write a raw Ctrl-V byte into the pane's pty
+  # via tmux send-keys instead of synthesizing the keystroke at OS level
+  # with ydotool. ydotool gets eaten by tmux's right-click `display-menu`
+  # modal grab; tmux send-keys writes to the pty AFTER the keytable
+  # layer, so the byte reaches the TUI directly without intermediaries.
+  # Claude Code (and other TUIs) trigger their image-paste handler on
+  # the \026 byte and read the clipboard via wl-paste (our shim).
+  log "image-paste branch (tmux send-keys): pane=$pane"
+  tmux send-keys -t "$pane" C-v 2>>"$LOG"
+  rc=$?
+  log "tmux send-keys C-v exit=$rc"
+  clog "paste-dispatch" "event=image-ctrlv-sent" "transport=tmux-send-keys-cv" "rc=$rc"
+  exit 0
 fi
 
 case "$client_term" in
