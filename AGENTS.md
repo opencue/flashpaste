@@ -4,44 +4,81 @@ Working rules for agents (Claude, Codex, etc.) editing this repository.
 
 ## Versioning + releases — non-negotiable
 
-**Every push that bumps a version MUST be accompanied by a matching GitHub release.** Pushing a commit titled `v1.X` without a release is a defect.
+**Every commit titled `vX.Y` MUST be tagged and have a matching GitHub release before you end your turn.** Pushing a `v1.X` commit without a tag is a defect; pushing a tag without a release is a defect. This rule applies to any agent (Claude, Codex, etc.) and to the user themselves — when committing in parallel, agents must check at end-of-turn that there's no untagged version commit on `main`.
 
-Workflow for any version bump:
+### TL;DR for AI agents
+
+Run this at the end of every turn that touched this repo, **before claiming done**:
+
+```bash
+bash AGENTS-release-check.sh   # or paste-inline:
+for sha in $(git log --format='%H %s' | awk '$2 ~ /^v[0-9]+\.[0-9]+/ {print $1}'); do
+  tag=$(git log -1 --format=%s "$sha" | awk '{print $1}' | tr -d ':')
+  if ! git tag -l "$tag" | grep -q "^$tag$"; then
+    echo "MISSING TAG: $tag at $sha"
+  fi
+done
+```
+
+If anything prints, you have unfinished work. Tag it, push it, verify the release.
+
+### The full workflow
+
+The repo has `.github/workflows/release.yml` that auto-builds the .deb and publishes a GitHub release on **every `v*` tag push**. So in practice the rule reduces to: **never push a `vX.Y` commit without immediately pushing the matching tag.**
 
 1. **Bump in this order:**
    - `README.md` — if a version string appears in the tagline or quick-start
-   - `bin/tmux-paste-dispatch.sh` header `WORKING VERSION: v1.X — <date>` comment
-   - Any other file with a `v1.X` literal — search with `git grep '^# WORKING VERSION'` and `git grep -F 'v1.'`
+   - `bin/tmux-paste-dispatch.sh` header `WORKING VERSION: v1.X — <date>` comment (note: historically not updated past v1.0; safe to leave alone unless the rest of the file is touched)
+   - Any other file with a `v1.X` literal — `git grep -F 'v1.'`
 
 2. **Commit message format:**
    ```
    v1.X: <one-line summary>
 
    <multi-paragraph body explaining what changed and why,
-   matching the style of v1.10–v1.14 in the existing history>
+   matching the style of v1.10–v1.17 in the existing history.>
 
    Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
    ```
    Use `git log --pretty=fuller` to confirm the trailer is preserved.
 
-3. **Tag + push:**
+3. **Tag + push — same turn as the commit, never deferred:**
    ```bash
-   git tag -a v1.X -m "v1.X: <one-line summary>"
    git push origin main
+   git tag -a v1.X -m "v1.X: <one-line summary>" <commit-sha>
    git push origin v1.X
    ```
+   The `<commit-sha>` is explicit so you tag the exact commit you just pushed, not HEAD (HEAD may have moved if the user committed in parallel).
 
-4. **Create the GitHub release immediately after pushing:**
+4. **The workflow handles the release.** Confirm with:
+   ```bash
+   gh run watch $(gh run list --workflow=release.yml --limit 1 --json databaseId -q '.[0].databaseId')
+   gh release view v1.X
+   ```
+   Workflow runs ~3 minutes (cargo build dominates). If the workflow fails, **investigate before ending the turn** — a failed release isn't optional cleanup, it's part of the bump.
+
+5. **If the workflow is absent** (early commits, or the file got deleted), fall back to manual:
    ```bash
    gh release create v1.X \
-     --title "v1.X: <one-line summary>" \
+     --title "flashpaste v1.X" \
      --notes "$(git log -1 --pretty=%B v1.X | tail -n +3)"
    ```
-   The `tail -n +3` skips the title line + blank line so the body is the multi-paragraph description.
-   - If this is a **breaking** change, add `--latest=true` and prepend a `### Breaking` block to the notes.
-   - If experimental / not ready for general use, add `--prerelease`.
+   Add `--prerelease` for experimental builds; add the .deb as an asset arg when you have one built.
 
-5. **Verify** with `gh release view v1.X` and `gh release list --limit 5`. The new release MUST appear in the list before considering the bump complete.
+### Backfill policy
+
+If you find untagged version commits in history (`v1.10`–`v1.14` are this case — they predate the .deb workflow), **do not retroactively tag them by default**. Reasons:
+- The workflow doesn't exist on those commits → tag push fails the build job.
+- Their build-deb.sh / Rust workspace may not exist or compile.
+- Auto-generated release notes for ancient tags add noise to the Releases page.
+
+If the user explicitly asks for backfill, push tags one-by-one and use `gh release create --notes` manually (no workflow) per tag. Verify each .deb (if any) is correct before moving on.
+
+### Hot-spot reminders
+
+- The user often commits in parallel with the agent. Always `git fetch origin && git log origin/main..HEAD` and `git log HEAD..origin/main` before tagging — your local HEAD may not be the version commit.
+- After `git push origin main` and `git push origin v1.X`, the workflow can take 2–5 minutes. Don't claim done before `gh release view v1.X` succeeds.
+- If the workflow fails for environmental reasons (transient apt fetch failure, runner restart), retry with `gh run rerun`. Don't push a v1.X+1 to "fix" a missing v1.X release.
 
 ## Version-number policy
 
