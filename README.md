@@ -4,7 +4,7 @@
 
 # FlashPaste
 
-### Paste screenshots into Claude Code, Codex CLI & Aider on GNOME Wayland — in ~15 ms.
+## Paste screenshots into Claude Code, Codex CLI & Aider on GNOME Wayland — in ~15 ms
 
 The missing clipboard glue between **GNOME**, **kitty**, **tmux** and your terminal LLM agent.<br>
 `PrtScr` → right-click → **Paste**. Image attached. Done.
