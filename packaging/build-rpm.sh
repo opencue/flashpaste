@@ -9,7 +9,7 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${VERSION:-$(git -C "$REPO_DIR" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "1.32")}"
+VERSION="${VERSION:-$(git -C "$REPO_DIR" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "1.33")}"
 RPM_TOP="${RPM_TOP:-$REPO_DIR/dist/rpmbuild}"
 OUT_DIR="$REPO_DIR/dist"
 SPEC="$REPO_DIR/packaging/rpm/flashpaste.spec"

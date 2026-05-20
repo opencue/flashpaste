@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# Capture an external image from the system clipboard into the flashpaste
+# screenshot cache so the daemon's inotify watcher stages it for paste.
+#
+# Use case: right-click → "Copy Image" in Firefox/Chrome puts image bytes
+# on the Wayland clipboard with no file write. The flashpasted daemon
+# normally only stages from inotify on ~/Pictures/Screenshots/, so a
+# browser-copied image bypasses the fast path entirely (ROADMAP.md:32).
+# On GNOME mutter, Claude Code's subsequent `wl-paste -t image/png` also
+# returns 0 bytes — mutter blocks surfaceless reads, and Firefox under
+# Wayland often doesn't mirror image bytes to the X11 selection either —
+# so nothing attaches.
+#
+# Strategy: read the bytes via real wl-paste then xclip fallback, validate
+# the magic, and write to ~/Pictures/Screenshots/flashpaste-clip-latest.png.
+# The daemon's inotify watcher fires `IN_CLOSE_WRITE` on the move, stages
+# the bytes in RAM, and owns both X11 and Wayland clipboards from the
+# in-memory copy. By the time the caller sends \026 to kitty, the daemon
+# serves Claude's wl-paste shim's xclip fallback with the captured bytes.
+#
+# Stable filename is intentional: a single overwriting file means no
+# accumulating clutter in the screenshots dir, and the daemon happily
+# re-stages on every overwrite (the inotify path is idempotent).
+#
+# Exit codes:
+#   0 — captured a fresh external image, file written to dest dir
+#   1 — no image MIME advertised on clipboard
+#   2 — image MIME advertised but byte read returned 0 (mutter surfaceless
+#       block + no X11 mirror) — caller should fall through to the normal
+#       send-text path; this helper has nothing to add
+
+set -u
+
+. "$HOME/.local/bin/clip-pipeline-log.sh" 2>/dev/null \
+  || . "$(dirname "$0")/clip-pipeline-log.sh" 2>/dev/null \
+  || true
+type clog >/dev/null 2>&1 || clog() { :; }
+
+# Use the REAL wl-paste, not our shim. The shim falls back to xclip when
+# real wl-paste returns empty — but xclip on a Wayland-only Firefox copy
+# would either return empty OR silently return whatever other X11 owner
+# is holding the selection (often the daemon's stale staged screenshot,
+# which is exactly the bug we're trying to fix). We want the truth: if
+# real wl-paste can't read the browser image, we explicitly fall back to
+# xclip with a magic-byte check downstream.
+REAL_WL_PASTE="${FLASHPASTE_REAL_WL_PASTE:-/usr/bin/wl-paste}"
+[ -x "$REAL_WL_PASTE" ] || REAL_WL_PASTE=$(command -v wl-paste 2>/dev/null)
+
+DEST_DIR="${FLASHPASTE_CAPTURE_DIR:-$HOME/Pictures/Screenshots}"
+DEST_NAME="${FLASHPASTE_CAPTURE_NAME:-flashpaste-clip-latest.png}"
+
+# Probe MIME types on both clipboard sides. Bail early if neither side
+# advertises an image — nothing to capture.
+wl_types=$(timeout 0.3 "$REAL_WL_PASTE" --list-types 2>/dev/null | tr '\n' ',')
+x_types=$(timeout 0.3 xclip -selection clipboard -t TARGETS -o 2>/dev/null | tr '\n' ',')
+case "$wl_types,$x_types" in
+  *image/*) ;;
+  *)
+    clog "capture-clip" "event=no-image-mime" "wl='$wl_types'" "x='$x_types'"
+    exit 1
+    ;;
+esac
+
+# Pick the best advertised MIME. Prefer PNG (lossless, universally accepted
+# by Claude Code), then JPEG, then WebP. Anything else falls back to the
+# first image/* we can find.
+mime=
+for want in image/png image/jpeg image/webp; do
+  case "$wl_types,$x_types" in
+    *"$want"*) mime="$want"; break ;;
+  esac
+done
+if [ -z "$mime" ]; then
+  mime=$(printf '%s,%s' "$wl_types" "$x_types" | tr ',' '\n' | grep -m1 '^image/' || true)
+fi
+if [ -z "$mime" ]; then
+  clog "capture-clip" "event=no-image-mime-after-pick"
+  exit 1
+fi
+
+mkdir -p "$DEST_DIR" 2>/dev/null || {
+  clog "capture-clip" "event=mkdir-failed" "dir='$DEST_DIR'"
+  exit 2
+}
+tmp=$(mktemp -t flashpaste-capture.XXXXXX) || exit 2
+trap 'rm -f "$tmp"' EXIT
+
+# Try real wl-paste first. On mutter from a surfaceless context this often
+# returns 0 bytes, but from a focused kitty subprocess it sometimes works
+# — and when it does, the bytes are exactly what the browser put there.
+src=
+if timeout 0.5 "$REAL_WL_PASTE" -t "$mime" >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+  src=wl-paste
+fi
+
+# Fall back to xclip if wl-paste returned empty.
+if [ -z "$src" ]; then
+  if timeout 0.5 xclip -selection clipboard -t "$mime" -o >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+    src=xclip
+  fi
+fi
+
+if [ -z "$src" ]; then
+  clog "capture-clip" "event=read-empty" "mime='$mime'"
+  exit 2
+fi
+
+# Magic-byte check. xclip silently returns text bytes when the requested
+# MIME isn't actually advertised (the wl-paste shim has the same defence —
+# see bin/wl-paste:99-104). Without this check we'd happily write a
+# UTF-8 URL to flashpaste-clip-latest.png and the daemon would dutifully
+# stage it as an "image", clobbering whatever real image was staged.
+magic=$(head -c 12 "$tmp" | od -An -tx1 | tr -d ' \n')
+ok=0
+case "$mime" in
+  image/png)
+    case "$magic" in 89504e470d0a1a0a*) ok=1 ;; esac
+    ;;
+  image/jpeg)
+    case "$magic" in ffd8ff*) ok=1 ;; esac
+    ;;
+  image/webp)
+    # RIFF<4-byte len>WEBP — match RIFF prefix and WEBP at offset 8.
+    case "$magic" in 52494646????????57454250*) ok=1 ;; esac
+    ;;
+  *)
+    # Unknown image MIME: trust it if there's *any* binary content. Worst
+    # case the daemon stages bytes that won't decode in Claude; not worse
+    # than the current behaviour where nothing attaches at all.
+    [ -s "$tmp" ] && ok=1
+    ;;
+esac
+if [ "$ok" = "0" ]; then
+  clog "capture-clip" "event=bad-magic" "mime='$mime'" "magic='$magic'" "src='$src'"
+  exit 2
+fi
+
+# Decide the final extension from the MIME (the dest filename is fixed,
+# but if the user has overridden FLASHPASTE_CAPTURE_NAME we honour any
+# extension they chose; otherwise we coerce PNG/JPEG/WebP into the right
+# suffix so the daemon's mime_for() inference matches what we captured).
+dest="$DEST_DIR/$DEST_NAME"
+case "$mime,$DEST_NAME" in
+  image/jpeg,flashpaste-clip-latest.png) dest="$DEST_DIR/flashpaste-clip-latest.jpg" ;;
+  image/webp,flashpaste-clip-latest.png) dest="$DEST_DIR/flashpaste-clip-latest.webp" ;;
+esac
+
+# Atomic rename so the daemon's inotify watcher sees one IN_MOVED_TO
+# instead of an IN_CLOSE_WRITE on a partially-written file. mktemp lives
+# on the same filesystem as $HOME on a default setup; if mv fails across
+# filesystems we copy then delete (less atomic but still complete-bytes).
+if ! mv -f "$tmp" "$dest" 2>/dev/null; then
+  if ! cp -f "$tmp" "$dest" 2>/dev/null; then
+    clog "capture-clip" "event=write-failed" "dest='$dest'"
+    exit 2
+  fi
+fi
+# Clear the trap so we don't try to rm $tmp after a successful mv.
+trap - EXIT
+
+size=$(stat -c %s "$dest" 2>/dev/null || echo 0)
+clog "capture-clip" "event=captured" "dest='$dest'" "bytes=$size" "src='$src'" "mime='$mime'"
+printf '%s\n' "$dest"

@@ -29,7 +29,7 @@ Target: tighten the existing bash, reduce surprises, make non-Ubuntu installs fr
 - [ ] **Add shellcheck + bats-core to a GitHub Actions CI** so regressions don't ship.
 - [ ] **Doctor: add machine-readable `--json` output** so other tools can consume the diagnosis.
 - [ ] **Wedge-cache eviction on `SIGUSR1`** — if user runs `flashpaste reset` (or after mutter recovers), drop the cache immediately instead of waiting 30s.
-- [ ] **Handle copy-image-from-browser** explicitly (Firefox / Chrome put image bytes on the clipboard without writing a file). Today the auto-pickup only triggers on screenshot *files*; browser images work via the regular probe path but the FAST PATH is bypassed.
+- [x] **Handle copy-image-from-browser** explicitly (Firefox / Chrome put image bytes on the clipboard without writing a file). Today the auto-pickup only triggers on screenshot *files*; browser images work via the regular probe path but the FAST PATH is bypassed. *Shipped via `bin/flashpaste-capture-clip`: the image branch of `bin/paste_image.sh` reads the bytes from the kitty-subprocess context, writes them to `~/Pictures/Screenshots/flashpaste-clip-latest.png`, and the daemon's inotify watcher stages them.*
 
 ## Phase 2 — Performance (Rust where it pays)
 

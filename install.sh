@@ -28,7 +28,8 @@ mkdir -p "$BIN_DST"
 for script in tmux-paste-dispatch.sh clipboard-set.sh clipboard-janitor.sh \
               get-clipboard-text.sh clip-pipeline-log.sh screenshot-to-clipboard \
               flashpaste-screenshot-preload.sh flashpaste-doctor.sh \
-              flashpaste-trace.sh flashpaste-logs.sh; do
+              flashpaste-trace.sh flashpaste-logs.sh \
+              flashpaste-capture-clip; do
   src="$BIN_SRC/$script"
   # Drop the .sh suffix on the destination for the user-facing log viewer
   # so `flashpaste-logs` is what shows up on $PATH (matches the muscle

@@ -6,6 +6,17 @@ Release-tag policy: every `vX.Y` commit on `main` must be tagged and have a matc
 
 ## [Unreleased]
 
+## [1.33] - 2026-05-21
+
+### Added
+
+- `bin/flashpaste-capture-clip` — new helper that reads an image from the system clipboard and writes it to `~/Pictures/Screenshots/flashpaste-clip-latest.png` so the daemon's inotify watcher can stage it. Bridges the long-standing "browser Copy Image" gap (`ROADMAP.md:32`, now ticked) where Firefox / Chrome put image bytes on the Wayland clipboard without writing a file, so the daemon's fast path never saw them and Claude Code's `wl-paste -t image/png` came back with 0 bytes (mutter blocks surfaceless reads, and Firefox under Wayland often doesn't mirror images to the X11 selection either). Stable filename — the file is overwritten on every capture, no clutter accumulates in the screenshots dir.
+
+### Changed
+
+- `bin/paste_image.sh` image branch now calls `flashpaste-capture-clip` before sending `\026` to kitty, then waits 60 ms for the daemon to claim the staged bytes. Cost is one extra wl-paste + xclip probe per image paste (~30–80 ms); the helper validates the PNG / JPEG / WebP magic so a malformed read can't clobber the daemon's stage with text bytes (the same xclip-lies-about-MIME trap the wl-paste shim already defends against at `bin/wl-paste:99-104`).
+- `rs/flashpaste-common/src/compress.rs` tightens the attachment defaults: `DEFAULT_MAX_BYTES` 4 MB → 3.5 MB and `DEFAULT_MAX_DIM` 2400 px → 1568 px. Claude's API caps single attachments at 5 MB base64 (~3.75 MB raw) and multi-image conversations at 2000×2000 px; the new defaults sit under both with headroom for HTTP framing and the JSON-RPC wrapper. Browser-copied images that come in larger now downscale cleanly before they hit the agent surface.
+
 ## [1.32] - 2026-05-20
 
 ### Added

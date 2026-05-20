@@ -47,14 +47,15 @@ use anyhow::{Context, Result};
 use image::imageops::FilterType;
 use image::{DynamicImage, ImageEncoder};
 
-/// Sensible default: 4 MB. Claude Code's attachment cap sits a bit
-/// higher than this, but we want headroom for HTTP framing and the
-/// JSON-RPC wrapper around the bytes.
-pub const DEFAULT_MAX_BYTES: usize = 4 * 1024 * 1024;
+/// Claude's API rejects images above 5 MB (base64-encoded). 5 MB
+/// base64 ≈ 3.75 MB raw bytes. Use 3.5 MB to leave headroom for HTTP
+/// framing and the JSON-RPC wrapper.
+pub const DEFAULT_MAX_BYTES: usize = 3_500_000;
 
-/// Sensible default: long-side 2400 px. Anything larger is downscaled
-/// before encoding.
-pub const DEFAULT_MAX_DIM: u32 = 2400;
+/// Claude's API caps images at 2000×2000 px in multi-image requests
+/// (any conversation with >1 image). Use 1568 to match Claude's
+/// optimal input resolution and stay well under the limit.
+pub const DEFAULT_MAX_DIM: u32 = 1568;
 
 /// Compress `path` for use as a Claude / agent attachment.
 ///
