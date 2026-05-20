@@ -14,7 +14,7 @@
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="${VERSION:-$(git -C "$REPO_DIR" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "1.33")}"
+VERSION="${VERSION:-$(git -C "$REPO_DIR" describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || echo "1.34")}"
 ARCH="${ARCH:-all}"     # all = noarch (pure bash)
 STAGE="${STAGE:-$REPO_DIR/dist/staging}"
 OUT_DIR="$REPO_DIR/dist"

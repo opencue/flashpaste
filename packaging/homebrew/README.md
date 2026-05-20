@@ -25,7 +25,7 @@ mkdir -p Formula
 cp /path/to/flashpaste/packaging/homebrew/flashpaste.rb Formula/
 
 # 3. Update sha256 in Formula/flashpaste.rb for the release:
-curl -sL https://github.com/NagyVikt/flashpaste/archive/refs/tags/v1.33.tar.gz \
+curl -sL https://github.com/NagyVikt/flashpaste/archive/refs/tags/v1.34.tar.gz \
   | sha256sum
 
 # 4. Commit + push.

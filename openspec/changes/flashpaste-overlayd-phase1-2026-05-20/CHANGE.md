@@ -6,7 +6,8 @@ slug: flashpaste-overlayd-phase1-2026-05-20
 # CHANGE · flashpaste-overlayd-phase1-2026-05-20
 
 ## §P  proposal
-# flashpaste-overlayd Phase 1 — references, protocol spec, crate scaffold, Rust message types
+
+### flashpaste-overlayd Phase 1 — references, protocol spec, crate scaffold, Rust message types
 
 ## Problem
 
@@ -46,15 +47,17 @@ Create rs/flashpaste-overlayd/src/protocol.rs. Implement #[derive(Serialize, Des
 
 File scope: rs/flashpaste-overlayd/src/protocol.rs
 
-
 ## §S  delta
-op|target|row
--|-|-
+
+| op | target | row |
+| - | - | - |
 
 ## §T  tasks
-id|status|task|cites
--|-|-|-
+
+| id | status | task | cites |
+| - | - | - | - |
 
 ## §B  bugs
-id|status|task|cites
--|-|-|-
+
+| id | status | task | cites |
+| - | - | - | - |

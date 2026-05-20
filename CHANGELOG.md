@@ -6,6 +6,12 @@ Release-tag policy: every `vX.Y` commit on `main` must be tagged and have a matc
 
 ## [Unreleased]
 
+## [1.34] - 2026-05-21
+
+### Fixed
+
+- CI hygiene rolled into a tagged release so the `v1.34` tag and the `Lint` workflow on the same commit agree. v1.33's release workflow shipped the .deb successfully, but the Lint workflow on that exact tag failed on pre-existing issues: `docs/overlay-references.md` MD032 (17 lists missing surrounding blank lines), `openspec/changes/flashpaste-overlayd-phase1-2026-05-20/CHANGE.md` MD022 / MD025 / MD012 / MD058 (proposal H1 nested inside an H2, doubled blank line, three tables without surrounding blanks), `openspec/plans/flashpaste-overlayd-phase1-2026-05-20/tasks.md` MD055 (table rows without leading / trailing pipes), `README.md:7` MD001 (h3 directly under h1, skipping h2 — promoted to h2), `tests/click-through.md:14` MD032 (list directly under a colon-terminated paragraph), and two dead links in `CHANGELOG.md` pointing at the never-tagged `v1.32` (now pointing at the existing `v1.33` / `v1.27` references). No behaviour change vs v1.33.
+
 ## [1.33] - 2026-05-21
 
 ### Added
@@ -181,8 +187,9 @@ Release-tag policy: every `vX.Y` commit on `main` must be tagged and have a matc
 
 Initial commit: sub-120 ms bash hot path for image-paste into GNOME Wayland TUIs.
 
-[Unreleased]: https://github.com/NagyVikt/flashpaste/compare/v1.32...HEAD
-[1.32]: https://github.com/NagyVikt/flashpaste/compare/v1.26...v1.32
+[Unreleased]: https://github.com/NagyVikt/flashpaste/compare/v1.34...HEAD
+[1.34]: https://github.com/NagyVikt/flashpaste/compare/v1.33...v1.34
+[1.33]: https://github.com/NagyVikt/flashpaste/compare/v1.27...v1.33
 [1.19]: https://github.com/NagyVikt/flashpaste/releases/tag/v1.19
 [1.18]: https://github.com/NagyVikt/flashpaste/releases/tag/v1.18
 [1.17]: https://github.com/NagyVikt/flashpaste/releases/tag/v1.17

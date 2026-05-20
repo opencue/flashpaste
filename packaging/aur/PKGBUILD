@@ -7,7 +7,7 @@
 # Source: GitHub release tarball (stable).
 
 pkgname=flashpaste
-pkgver=1.33
+pkgver=1.34
 pkgrel=1
 pkgdesc="Sub-15ms image-paste glue for terminal AI agents on GNOME Wayland"
 arch=('x86_64')

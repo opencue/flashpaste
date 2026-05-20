@@ -11,6 +11,7 @@ XWayland: present
 ```
 
 Source for detection:
+
 - `loginctl show-session 3 -p Type -p State` reported `Type=wayland` and `State=active`.
 - Host process list showed `gnome-shell` and `Xwayland :1`.
 

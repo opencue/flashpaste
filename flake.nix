@@ -28,7 +28,7 @@
 
         flashpaste = pkgs.rustPlatform.buildRustPackage {
           pname = "flashpaste";
-          version = "1.33";
+          version = "1.34";
           src = ./.;
 
           # Cargo workspace lives under rs/.
