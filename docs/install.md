@@ -51,6 +51,7 @@ Per-user activation (one time):
 
 ```bash
 systemctl --user daemon-reload
+systemctl --user enable --now flashpasted.service
 systemctl --user enable --now clipboard-janitor.service
 systemctl --user enable --now flashpaste-screenshot-watcher.path
 cat /usr/share/flashpaste/examples/tmux.conf.snippet  >> ~/.tmux.conf
@@ -70,13 +71,13 @@ make deb                                  # → dist/flashpaste_*_all.deb
 sudo apt install ./dist/flashpaste_*_all.deb
 ```
 
-The `make deb` target auto-includes the Rust binaries if `rs/target/release/*` already exists. Build the Rust workspace first (`cargo build --release --manifest-path rs/Cargo.toml`) to get a `.deb` with Tier 2 and Tier 3 bundled.
+The `make deb` target auto-includes the Rust binaries if `rs/target/release/*` already exists. Build the Rust workspace first (`cargo build --release --locked --manifest-path rs/Cargo.toml`) to get a `.deb` with Tier 2 and Tier 3 bundled.
 
 To include the agent overlay daemon and `flashpaste-overlay` client in a local `.deb`, install the Cairo/Pango/GLib development headers and build the overlay package with the Wayland renderer before `make deb`:
 
 ```bash
 sudo apt install pkg-config libcairo2-dev libglib2.0-dev libpango1.0-dev
-cargo build --release --manifest-path rs/Cargo.toml -p flashpaste-overlayd --features wayland
+cargo build --release --locked --manifest-path rs/Cargo.toml -p flashpaste-overlayd --features wayland
 make deb
 ```
 
@@ -109,13 +110,28 @@ The bash hot path (Tier 1) is always installed. Tier 2 (`flashpaste-dispatch`) a
 
 ```bash
 cd ~/.local/share/flashpaste/rs
-cargo build --release
+cargo build --release --locked
 install -m 0755 target/release/flashpaste-{dispatch,trigger,shoot} \
                 target/release/flashpasted \
                 ~/.local/bin/
 
 # Enable the daemon (Tier 3)
-cp ../systemd/flashpasted.service ~/.config/systemd/user/
+cat > ~/.config/systemd/user/flashpasted.service <<'EOF'
+[Unit]
+Description=flashpaste daemon (clipboard owner + paste dispatcher)
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/flashpasted
+Restart=on-failure
+RestartSec=2
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=default.target
+EOF
 systemctl --user daemon-reload
 systemctl --user enable --now flashpasted.service
 ```

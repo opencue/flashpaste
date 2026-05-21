@@ -73,7 +73,7 @@ package() {
     _base="$(basename "$_src" .sh)"
     install -Dm0755 "$_src" "$pkgdir/usr/bin/$_base"
   done
-  for _src in bin/wl-paste bin/screenshot-to-clipboard; do
+  for _src in bin/wl-paste bin/screenshot-to-clipboard bin/flashpaste-capture-clip; do
     [ -f "$_src" ] || continue
     install -Dm0755 "$_src" "$pkgdir/usr/bin/$(basename "$_src")"
   done

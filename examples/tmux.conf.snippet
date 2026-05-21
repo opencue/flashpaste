@@ -36,7 +36,7 @@ bind -n TripleClick1Pane select-pane \; copy-mode -M \; send-keys -X select-line
 # is a 5-ms Rust client that pings the flashpasted daemon over a unix
 # socket; if the daemon isn't running it falls back to the bash
 # dispatch script. Same handler covers text paste AND image paste.
-bind -n C-v run-shell -b "TMUX_PASTE_TRIGGER=ctrl-v flashpaste-trigger '#{pane_id}' 2>/dev/null || TMUX_PASTE_TRIGGER=ctrl-v /home/$USER/.local/bin/tmux-paste-dispatch.sh '#{pane_id}'"
+bind -n C-v run-shell -b "TMUX_PASTE_TRIGGER=ctrl-v flashpaste-trigger '#{pane_id}' 2>/dev/null || TMUX_PASTE_TRIGGER=ctrl-v tmux-paste-dispatch '#{pane_id}' 2>/dev/null || TMUX_PASTE_TRIGGER=ctrl-v tmux-paste-dispatch.sh '#{pane_id}'"
 
 # Middle-click paste from system clipboard.
 bind -n MouseDown2Pane run-shell -b "buf=$(sh -c '#{@paste}'); if [ -n \"$buf\" ]; then printf '%s' \"$buf\" | tmux load-buffer -b mid_paste - 2>/dev/null && tmux paste-buffer -d -p -b mid_paste -t '#{pane_id}' 2>/dev/null; fi"
@@ -57,7 +57,7 @@ bind -n MouseDown2Pane run-shell -b "buf=$(sh -c '#{@paste}'); if [ -n \"$buf\" 
 bind -n MouseDown3Pane display-menu -O -x M -y M \
   -T "#[align=centre,fg=#FFFFFF,bold] pane #{pane_index} " \
   "#[fg=#34C759]↳ Paste" p \
-    "run-shell -b \"TMUX_PASTE_TRIGGER=right-click-menu flashpaste-trigger '#{pane_id}' 2>/dev/null || TMUX_PASTE_TRIGGER=right-click-menu /home/$USER/.local/bin/tmux-paste-dispatch.sh '#{pane_id}'\""
+    "run-shell -b \"TMUX_PASTE_TRIGGER=right-click-menu flashpaste-trigger '#{pane_id}' 2>/dev/null || TMUX_PASTE_TRIGGER=right-click-menu tmux-paste-dispatch '#{pane_id}' 2>/dev/null || TMUX_PASTE_TRIGGER=right-click-menu tmux-paste-dispatch.sh '#{pane_id}'\""
 
 # Recursion-guard note: the C-v binding above intentionally re-invokes
 # the dispatcher when kitty `send-text` injects a \026 byte. The

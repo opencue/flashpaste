@@ -46,6 +46,10 @@ for script in tmux-paste-dispatch.sh clipboard-set.sh clipboard-janitor.sh \
   fi
   ln -sf "$src" "$dst"
   say "symlinked $script -> $src"
+  if [ "$script" = "tmux-paste-dispatch.sh" ]; then
+    ln -sf "$src" "$BIN_DST/tmux-paste-dispatch"
+    say "symlinked tmux-paste-dispatch -> $src"
+  fi
 done
 
 # wl-paste shim is special: replaces any existing symlink to /usr/bin/wl-paste.
@@ -58,21 +62,25 @@ ln -sf "$BIN_SRC/wl-paste" "$WLP"
 say "symlinked wl-paste shim (overrides /usr/bin/wl-paste via PATH order)"
 
 RS_BIN_SRC=""
-if [ -x "$REPO_DIR/rs/target/release/flashpaste-overlayd" ]; then
+if [ -d "$REPO_DIR/rs/target/release" ]; then
   RS_BIN_SRC="$REPO_DIR/rs/target/release"
-elif [ -x "$REPO_DIR/rs/target/debug/flashpaste-overlayd" ]; then
+elif [ -d "$REPO_DIR/rs/target/debug" ]; then
   RS_BIN_SRC="$REPO_DIR/rs/target/debug"
 fi
 
 if [ -n "$RS_BIN_SRC" ]; then
-  for bin in flashpaste-overlayd flashpaste-overlay; do
+  rs_found=0
+  for bin in flashpaste flashpasted flashpaste-dispatch flashpaste-trigger \
+             flashpaste-shoot flashpaste-mcp flashpaste-overlayd flashpaste-overlay; do
     if [ -x "$RS_BIN_SRC/$bin" ]; then
       ln -sf "$RS_BIN_SRC/$bin" "$BIN_DST/$bin"
       say "symlinked $bin -> $RS_BIN_SRC/$bin"
+      rs_found=1
     fi
   done
+  [ "$rs_found" -eq 1 ] || warn "no executable Rust binaries found under $RS_BIN_SRC"
 else
-  warn "flashpaste-overlayd binary not found under rs/target/{release,debug}; overlay service will be installed but not started"
+  warn "Rust binaries not found under rs/target/{release,debug}; daemon/overlay services will be installed but not started"
 fi
 
 # paste_image.sh lives at $HOME (referenced by absolute path from kitty.conf).

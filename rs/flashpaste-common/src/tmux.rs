@@ -11,16 +11,11 @@ use std::process::{Command, Stdio};
 
 use nix::libc;
 
-/// Exact rebind command the bash dispatcher uses. Kept as a constant so
-/// the rebind always points at the canonical install location of the
-/// bash script — that script is the slow-path fallback during Phase 1.
-///
-/// IMPORTANT: this MUST stay pointed at `tmux-paste-dispatch.sh` (NOT
-/// the Rust binary) until Phase 1 is the default. The Rust binary is
-/// opt-in via the README instructions; users who flip the bind to the
-/// Rust binary will manually update this rebind text too.
+/// Exact rebind command the bash dispatcher uses. It resolves fallbacks through
+/// PATH so source installs (`tmux-paste-dispatch.sh`) and packages
+/// (`tmux-paste-dispatch`) both work.
 pub const REBIND_CMD: &str =
-    "tmux bind -n C-v run-shell -b \"TMUX_PASTE_TRIGGER=ctrl-v /home/deadpool/.local/bin/tmux-paste-dispatch.sh '#{pane_id}'\"";
+    "tmux bind -n C-v run-shell -b \"TMUX_PASTE_TRIGGER=ctrl-v flashpaste-trigger '#{pane_id}' 2>/dev/null || TMUX_PASTE_TRIGGER=ctrl-v tmux-paste-dispatch '#{pane_id}' 2>/dev/null || TMUX_PASTE_TRIGGER=ctrl-v tmux-paste-dispatch.sh '#{pane_id}'\"";
 
 /// `tmux select-pane -t <pane>`. Errors are silently swallowed — the
 /// bash script ends with `|| true` for the same reason: pane selection
@@ -67,7 +62,7 @@ pub fn unbind_ctrl_v() -> io::Result<()> {
 /// ```text
 ///   setsid -f sh -c '
 ///     sleep 0.1
-///     tmux bind -n C-v run-shell -b "TMUX_PASTE_TRIGGER=ctrl-v /home/deadpool/.local/bin/tmux-paste-dispatch.sh '"'"'#{pane_id}'"'"'"
+///     tmux bind -n C-v run-shell -b "TMUX_PASTE_TRIGGER=ctrl-v flashpaste-trigger '#{pane_id}' 2>/dev/null || TMUX_PASTE_TRIGGER=ctrl-v tmux-paste-dispatch '#{pane_id}' 2>/dev/null || TMUX_PASTE_TRIGGER=ctrl-v tmux-paste-dispatch.sh '#{pane_id}'"
 ///   ' </dev/null >/dev/null 2>&1
 /// ```
 ///

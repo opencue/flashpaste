@@ -4,7 +4,7 @@ Documentation=https://github.com/NagyVikt/flashpaste
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/clipboard-janitor.sh
+ExecStart=/usr/bin/clipboard-janitor
 Restart=on-failure
 RestartSec=3
 

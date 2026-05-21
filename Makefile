@@ -46,7 +46,7 @@ uninstall:
 	@for f in tmux-paste-dispatch.sh clipboard-set.sh clipboard-janitor.sh \
 	          get-clipboard-text.sh clip-pipeline-log.sh screenshot-to-clipboard \
 	          flashpaste-screenshot-preload.sh flashpaste-doctor.sh \
-	          flashpaste-trace.sh wl-paste flashpaste-overlayd flashpaste-overlay; do \
+	          flashpaste-trace.sh wl-paste tmux-paste-dispatch flashpaste-overlayd flashpaste-overlay; do \
 	  [ -L "$$HOME/.local/bin/$$f" ] && rm "$$HOME/.local/bin/$$f" && echo "  removed ~/.local/bin/$$f" || true; \
 	done
 	@for f in wl-clipboard.desktop wl-paste.desktop wl-copy.desktop; do \
@@ -61,8 +61,9 @@ clean:
 
 release-deb: deb
 	@echo "release-deb produced: dist/flashpaste_$(VERSION)_all.deb"
+	@echo "stable alias produced: dist/flashpaste_all.deb"
 	@echo "Upload to GitHub Releases:"
-	@echo "  gh release create v$(VERSION) dist/flashpaste_$(VERSION)_all.deb --title 'flashpaste v$(VERSION)' --generate-notes"
+	@echo "  gh release create v$(VERSION) dist/flashpaste_$(VERSION)_all.deb dist/flashpaste_all.deb --title 'flashpaste v$(VERSION)' --generate-notes"
 
 # ---------------------------------------------------------------------------
 # Benchmarks

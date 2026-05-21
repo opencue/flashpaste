@@ -31,25 +31,116 @@ jobs:
       - name: bash -n syntax pre-check on every .sh
         run: |
           set -e
-          # Recursively syntax-check every shell script in the repo.
+          # Syntax-check every tracked shell script, including extensionless
+          # helpers in bin/.
           # Fails fast so the more expensive shellcheck only runs if
           # the scripts parse at all.
           while IFS= read -r -d '' f; do
             echo "bash -n $f"
             bash -n "$f"
-          done < <(find . -type f -name '*.sh' -not -path './rs/target/*' -print0)
+          done < <(
+            for f in $(git ls-files); do
+              [ -f "$f" ] || continue
+              case "$f" in
+                *.sh) printf '%s\0' "$f" ;;
+                *) head -n 1 "$f" | grep -Eq '^#!.*(ba)?sh' && printf '%s\0' "$f" || true ;;
+              esac
+            done
+          )
 
       - name: shellcheck (warning severity)
         run: |
           # SC1090 (can't follow non-constant source), SC2034 (unused var
           # exported for sibling scripts), SC2155 (declare and assign on
           # one line) are noisy in this codebase and intentional.
+          mapfile -d '' shell_files < <(
+            for f in $(git ls-files); do
+              [ -f "$f" ] || continue
+              case "$f" in
+                *.sh) printf '%s\0' "$f" ;;
+                *) head -n 1 "$f" | grep -Eq '^#!.*(ba)?sh' && printf '%s\0' "$f" || true ;;
+              esac
+            done
+          )
           shellcheck -S warning \
             -e SC1090,SC2034,SC2155 \
-            bin/*.sh \
-            install.sh \
-            bootstrap.sh \
-            AGENTS-release-check.sh
+            "${shell_files[@]}"
+
+  rust:
+    name: rust fmt + clippy + unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libwayland-dev libx11-dev libdbus-1-dev pkg-config libcairo2-dev libglib2.0-dev libpango1.0-dev
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rs/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rs/Cargo.lock', 'rs/Cargo.toml', 'rs/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: cargo fmt
+        run: cargo fmt --manifest-path rs/Cargo.toml --check
+
+      - name: cargo clippy
+        run: cargo clippy --release --locked --manifest-path rs/Cargo.toml -- -D warnings
+
+      - name: cargo clippy overlay wayland
+        run: cargo clippy --release --locked --manifest-path rs/Cargo.toml -p flashpaste-overlayd --features wayland -- -D warnings
+
+      - name: cargo unit tests
+        run: cargo test --locked --manifest-path rs/Cargo.toml --workspace --lib --bins
+
+  package-smoke:
+    name: package smoke
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install package build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y dpkg-dev libwayland-dev libx11-dev libdbus-1-dev pkg-config libcairo2-dev libglib2.0-dev libpango1.0-dev
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rs/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rs/Cargo.lock', 'rs/Cargo.toml', 'rs/**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Build Rust workspace
+        run: cargo build --release --locked --manifest-path rs/Cargo.toml
+
+      - name: Build overlay daemon
+        run: cargo build --release --locked --manifest-path rs/Cargo.toml -p flashpaste-overlayd --features wayland
+
+      - name: Build .deb
+        run: VERSION=0.0.0 bash packaging/build-deb.sh
+
+      - name: Install package in Ubuntu container
+        run: bash packaging/package-smoke.sh
 
   markdown-lint:
     name: markdownlint

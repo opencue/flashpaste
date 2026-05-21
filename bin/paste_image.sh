@@ -35,7 +35,10 @@
 #   "text"    → force text branch
 set -u
 
-. /home/deadpool/.local/bin/clip-pipeline-log.sh 2>/dev/null || true
+_self_dir=$(dirname -- "$0")
+_clog_helper=$(command -v clip-pipeline-log.sh 2>/dev/null || true)
+[ -n "$_clog_helper" ] || _clog_helper="$_self_dir/clip-pipeline-log.sh"
+. "$_clog_helper" 2>/dev/null || true
 type clog >/dev/null 2>&1 || clog() { :; }
 clog "paste-image" "event=invoked" "arg='${1:-}'" "KITTY_WINDOW_ID='${KITTY_WINDOW_ID:-}'" "KITTY_LISTEN_ON='${KITTY_LISTEN_ON:-}'"
 

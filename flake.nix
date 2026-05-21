@@ -34,13 +34,9 @@
           # Cargo workspace lives under rs/.
           sourceRoot = "source/rs";
 
-          # MAINTAINER: replace fakeHash with the real hash after the first
-          # `nix build` — Nix will print the expected value in the error
-          # message. Re-run `nix build` until it succeeds.
           cargoLock = {
             lockFile = ./rs/Cargo.lock;
           };
-          cargoHash = lib.fakeHash;
 
           nativeBuildInputs = with pkgs; [
             pkg-config
@@ -65,43 +61,43 @@
           # bins into $out/bin/ before `postInstall` runs.
           postInstall = ''
             # Bash helpers from bin/  →  $out/bin/  (strip .sh)
-            for src in $src/../bin/*.sh; do
+            for src in $src/bin/*.sh; do
               [ -f "$src" ] || continue
               base="$(basename "$src" .sh)"
               install -Dm0755 "$src" "$out/bin/$base"
             done
-            for src in $src/../bin/wl-paste $src/../bin/screenshot-to-clipboard; do
+            for src in $src/bin/wl-paste $src/bin/screenshot-to-clipboard $src/bin/flashpaste-capture-clip; do
               [ -f "$src" ] || continue
               install -Dm0755 "$src" "$out/bin/$(basename "$src")"
             done
 
             # paste_image.sh shared payload.
-            install -Dm0755 $src/../bin/paste_image.sh \
+            install -Dm0755 $src/bin/paste_image.sh \
               "$out/share/flashpaste/paste_image.sh"
 
             # systemd user units (Nix users typically wire these via
             # home-manager; ship them under share/ for reference).
-            for unit in $src/../systemd/clipboard-janitor.service \
-                        $src/../systemd/flashpaste-screenshot-watcher.path \
-                        $src/../systemd/flashpaste-screenshot-watcher.service \
-                        $src/../systemd/flashpasted.service \
-                        $src/../systemd/flashpaste-overlayd.service; do
+            for unit in $src/systemd/clipboard-janitor.service \
+                        $src/systemd/flashpaste-screenshot-watcher.path \
+                        $src/systemd/flashpaste-screenshot-watcher.service \
+                        $src/systemd/flashpasted.service \
+                        $src/systemd/flashpaste-overlayd.service; do
               [ -f "$unit" ] || continue
               install -Dm0644 "$unit" "$out/lib/systemd/user/$(basename "$unit")"
             done
 
             # Desktop entries.
-            for desk in $src/../share/applications/*.desktop; do
+            for desk in $src/share/applications/*.desktop; do
               [ -f "$desk" ] || continue
               install -Dm0644 "$desk" "$out/share/applications/$(basename "$desk")"
             done
 
             # Examples + docs.
-            install -Dm0644 $src/../examples/tmux.conf.snippet \
+            install -Dm0644 $src/examples/tmux.conf.snippet \
               "$out/share/flashpaste/examples/tmux.conf.snippet"
-            install -Dm0644 $src/../examples/kitty.conf.snippet \
+            install -Dm0644 $src/examples/kitty.conf.snippet \
               "$out/share/flashpaste/examples/kitty.conf.snippet"
-            install -Dm0644 $src/../README.md \
+            install -Dm0644 $src/README.md \
               "$out/share/doc/flashpaste/README.md"
 
             # Wrap the user-facing entrypoints so runtime deps resolve

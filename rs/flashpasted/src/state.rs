@@ -127,7 +127,7 @@ impl DaemonConfig {
             .clone()
             .or_else(default_screenshots_dir);
         let kitty_version = detect_kitty_version();
-        let bash_fallback = PathBuf::from("/home/deadpool/.local/bin/tmux-paste-dispatch.sh");
+        let bash_fallback = default_bash_fallback_path();
         let tmux_rebind_command = default_tmux_rebind_command();
 
         Ok(Self {
@@ -300,9 +300,24 @@ fn default_tmux_rebind_command() -> String {
     String::from(
         "tmux bind -n C-v run-shell -b \"TMUX_PASTE_TRIGGER=ctrl-v \
          flashpaste-trigger '#{pane_id}' 2>/dev/null || \
-         TMUX_PASTE_TRIGGER=ctrl-v \
-         /home/deadpool/.local/bin/tmux-paste-dispatch.sh '#{pane_id}'\"",
+         TMUX_PASTE_TRIGGER=ctrl-v tmux-paste-dispatch '#{pane_id}' 2>/dev/null || \
+         TMUX_PASTE_TRIGGER=ctrl-v tmux-paste-dispatch.sh '#{pane_id}'\"",
     )
+}
+
+fn default_bash_fallback_path() -> PathBuf {
+    if let Ok(path) = std::env::var("FLASHPASTE_BASH_FALLBACK") {
+        if !path.is_empty() {
+            return PathBuf::from(path);
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home)
+            .join(".local")
+            .join("bin")
+            .join("tmux-paste-dispatch.sh");
+    }
+    PathBuf::from("/usr/bin/tmux-paste-dispatch")
 }
 
 /// Detect the kitty IPC protocol version at startup. We run `kitty --version`

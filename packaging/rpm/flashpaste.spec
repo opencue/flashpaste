@@ -35,7 +35,7 @@ mkdir -p %{buildroot}%{_docdir}/%{name}
 mkdir -p %{buildroot}%{_licensedir}/%{name}
 mkdir -p %{buildroot}%{_prefix}/lib/systemd/user
 
-for src in %{repo_dir}/bin/*.sh %{repo_dir}/bin/wl-paste %{repo_dir}/bin/screenshot-to-clipboard; do
+for src in %{repo_dir}/bin/*.sh %{repo_dir}/bin/wl-paste %{repo_dir}/bin/screenshot-to-clipboard %{repo_dir}/bin/flashpaste-capture-clip; do
   [ -f "$src" ] || continue
   base="$(basename "$src" .sh)"
   install -m 0755 "$src" "%{buildroot}%{_bindir}/$base"
@@ -75,6 +75,7 @@ cat <<'EOF'
 flashpaste installed. To activate for your user:
 
   systemctl --user daemon-reload
+  systemctl --user enable --now flashpasted.service
   systemctl --user enable --now clipboard-janitor.service
   systemctl --user enable --now flashpaste-screenshot-watcher.path
 EOF
@@ -97,7 +98,7 @@ if [ "$1" = "0" ]; then
   cat <<'EOF'
 
 flashpaste is being removed. To clean up per-user state:
-  systemctl --user disable --now clipboard-janitor.service flashpaste-screenshot-watcher.path
+  systemctl --user disable --now flashpasted.service clipboard-janitor.service flashpaste-screenshot-watcher.path
 EOF
   if [ -f /usr/lib/systemd/user/flashpaste-overlayd.service ]; then
     echo "  systemctl --user disable --now flashpaste-overlayd.service"

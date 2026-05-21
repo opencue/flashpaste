@@ -16,6 +16,7 @@
 //!    is empty.
 
 pub mod clipboard;
+pub mod clipboard_policy;
 pub mod compress;
 pub mod kitty_ipc;
 pub mod log;

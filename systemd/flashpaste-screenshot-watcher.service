@@ -4,4 +4,4 @@ Documentation=https://github.com/NagyVikt/flashpaste
 
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/flashpaste-screenshot-preload.sh
+ExecStart=/usr/bin/flashpaste-screenshot-preload

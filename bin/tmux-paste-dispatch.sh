@@ -127,7 +127,10 @@ set -u
 # --- logging ---------------------------------------------------------
 readonly LOG="${TMUX_PASTE_LOG:-$HOME/.local/state/tmux-paste.log}"
 mkdir -p "$(dirname "$LOG")" 2>/dev/null
-. /home/deadpool/.local/bin/clip-pipeline-log.sh 2>/dev/null || true
+_self_dir=$(dirname -- "$0")
+_clog_helper=$(command -v clip-pipeline-log.sh 2>/dev/null || true)
+[ -n "$_clog_helper" ] || _clog_helper="$_self_dir/clip-pipeline-log.sh"
+. "$_clog_helper" 2>/dev/null || true
 type clog >/dev/null 2>&1 || clog() { :; }
 log() {
   printf '[%s] pid=%s pane=%s trigger=%s :: %s\n' \
@@ -278,7 +281,7 @@ if [ "$_early_loaded" = "1" ]; then
         log "FAST PATH: send-text done"
         setsid -f sh -c '
           sleep 0.1
-          tmux bind -n C-v run-shell -b "TMUX_PASTE_TRIGGER=ctrl-v /home/deadpool/.local/bin/tmux-paste-dispatch.sh '\''#{pane_id}'\''"
+          tmux bind -n C-v run-shell -b "TMUX_PASTE_TRIGGER=ctrl-v flashpaste-trigger '\''#{pane_id}'\'' 2>/dev/null || TMUX_PASTE_TRIGGER=ctrl-v tmux-paste-dispatch '\''#{pane_id}'\'' 2>/dev/null || TMUX_PASTE_TRIGGER=ctrl-v tmux-paste-dispatch.sh '\''#{pane_id}'\''"
         ' </dev/null >/dev/null 2>&1
         t "fast-path exit"
         exit 0
@@ -317,7 +320,9 @@ fi
 # on the Wayland side.
 {
   x_text=$(timeout 0.5 xclip -selection clipboard -o 2>/dev/null | head -c 200)
-  helper_text=$(timeout 3 /home/deadpool/.local/bin/get-clipboard-text.sh 2>/dev/null | head -c 200)
+  _text_helper=$(command -v get-clipboard-text.sh 2>/dev/null || true)
+  [ -n "$_text_helper" ] || _text_helper="$_self_dir/get-clipboard-text.sh"
+  helper_text=$(timeout 3 "$_text_helper" 2>/dev/null | head -c 200)
   log "xclip ='$(printf '%s' "$x_text"  | tr '\n\r\t' '   ')'"
   log "helper='$(printf '%s' "$helper_text" | tr '\n\r\t' '   ')'"
 } &
@@ -566,7 +571,7 @@ if [ "$has_image" -eq 1 ]; then
         clog "paste-dispatch" "event=image-ctrlv-sent" "transport=kitty-send-text-unbound" "rc=$rc"
         setsid -f sh -c '
           sleep 0.1
-          tmux bind -n C-v run-shell -b "TMUX_PASTE_TRIGGER=ctrl-v /home/deadpool/.local/bin/tmux-paste-dispatch.sh '\''#{pane_id}'\''"
+          tmux bind -n C-v run-shell -b "TMUX_PASTE_TRIGGER=ctrl-v flashpaste-trigger '\''#{pane_id}'\'' 2>/dev/null || TMUX_PASTE_TRIGGER=ctrl-v tmux-paste-dispatch '\''#{pane_id}'\'' 2>/dev/null || TMUX_PASTE_TRIGGER=ctrl-v tmux-paste-dispatch.sh '\''#{pane_id}'\''"
         ' </dev/null >/dev/null 2>&1
         log "image-paste: rebind scheduled (setsid +100ms)"
         exit 0

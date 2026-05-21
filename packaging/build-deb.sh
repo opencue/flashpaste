@@ -19,6 +19,7 @@ ARCH="${ARCH:-all}"     # all = noarch (pure bash)
 STAGE="${STAGE:-$REPO_DIR/dist/staging}"
 OUT_DIR="$REPO_DIR/dist"
 OUT_DEB="$OUT_DIR/flashpaste_${VERSION}_${ARCH}.deb"
+OUT_DEB_STABLE="$OUT_DIR/flashpaste_${ARCH}.deb"
 
 GREEN='\033[1;32m'; YEL='\033[1;33m'; RED='\033[1;31m'; RESET='\033[0m'
 say()  { printf "${GREEN}==>${RESET} %s\n" "$*"; }
@@ -41,7 +42,7 @@ mkdir -p "$STAGE/usr/lib/systemd/user"
 
 # ── filesystem payload ───────────────────────────────────────────
 # Scripts go to /usr/bin/ (executable, no .sh suffix to be PATH-friendly).
-for src in "$REPO_DIR"/bin/*.sh "$REPO_DIR"/bin/wl-paste "$REPO_DIR"/bin/screenshot-to-clipboard; do
+for src in "$REPO_DIR"/bin/*.sh "$REPO_DIR"/bin/wl-paste "$REPO_DIR"/bin/screenshot-to-clipboard "$REPO_DIR"/bin/flashpaste-capture-clip; do
   [ -f "$src" ] || continue
   base=$(basename "$src" .sh)
   install -m 0755 "$src" "$STAGE/usr/bin/$base"
@@ -129,6 +130,7 @@ Description: sub-120ms image paste for terminal AI agents on GNOME Wayland
  /usr/share/flashpaste/examples/ to your dotfiles and enable the
  systemd user services:
  .
+   systemctl --user enable --now flashpasted.service
    systemctl --user enable --now clipboard-janitor.service
    systemctl --user enable --now flashpaste-screenshot-watcher.path
 EOF
@@ -144,6 +146,9 @@ echo
 echo "flashpaste installed. To activate for your user:"
 echo
 echo "  systemctl --user daemon-reload"
+if command -v flashpasted >/dev/null 2>&1 && [ -f /usr/lib/systemd/user/flashpasted.service ]; then
+  echo "  systemctl --user enable --now flashpasted.service"
+fi
 echo "  systemctl --user enable --now clipboard-janitor.service"
 echo "  systemctl --user enable --now flashpaste-screenshot-watcher.path"
 if command -v flashpaste-overlayd >/dev/null 2>&1 && [ -f /usr/lib/systemd/user/flashpaste-overlayd.service ]; then
@@ -193,7 +198,7 @@ set -e
 # touch user services anyway. Print a hint instead.
 echo
 echo "flashpaste is being removed. To clean up per-user state:"
-echo "  systemctl --user disable --now clipboard-janitor.service flashpaste-screenshot-watcher.path"
+echo "  systemctl --user disable --now flashpasted.service clipboard-janitor.service flashpaste-screenshot-watcher.path"
 if [ -f /usr/lib/systemd/user/flashpaste-overlayd.service ]; then
   echo "  systemctl --user disable --now flashpaste-overlayd.service"
 fi
@@ -206,6 +211,7 @@ chmod 0755 "$STAGE/DEBIAN/prerm"
 # ── build ─────────────────────────────────────────────────────────
 say "building $OUT_DEB"
 dpkg-deb --root-owner-group --build "$STAGE" "$OUT_DEB"
+cp -f "$OUT_DEB" "$OUT_DEB_STABLE"
 
 # Cleanup staging.
 rm -rf "$STAGE"
@@ -217,6 +223,7 @@ if command -v lintian >/dev/null 2>&1; then
 fi
 
 say "done: $OUT_DEB ($(stat -c%s "$OUT_DEB" 2>/dev/null) bytes)"
+say "stable alias: $OUT_DEB_STABLE"
 echo
 echo "Install with:"
 echo "  sudo apt install $OUT_DEB"

@@ -12,13 +12,13 @@ description = "Unified `flashpaste` CLI that wraps flashpasted, flashpaste-dispa
 name = "flashpaste"
 path = "src/main.rs"
 
-# This crate is a thin process-launcher. We deliberately keep its dep tree
-# minimal — no tokio runtime, no wayland/x11/portal crates — so the cold
-# start of `flashpaste <subcmd>` is as cheap as a direct exec of the
-# wrapped binary.
+# This crate is a thin process-launcher. The `paths` subcommand uses the
+# shared resolver from flashpaste-common so scripts, snippets, and Rust
+# callers report the same install-layout decisions.
 [dependencies]
 anyhow = { workspace = true }
 clap = { workspace = true }
+flashpaste-common = { workspace = true }
 # tokio is declared in the workspace deps and listed here per the spec.
 # This crate is currently a sync process-launcher so we don't drive a
 # runtime — keeping the dep keeps the door open for future async work

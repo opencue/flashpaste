@@ -171,8 +171,10 @@ emit() {
   fi
 ) &
 
-# 11. tmux-paste-dispatch.sh already installed?
-( if [ -x "$HOME/.local/bin/tmux-paste-dispatch.sh" ]; then
+# 11. tmux-paste-dispatch already installed?
+( if path=$(command -v tmux-paste-dispatch 2>/dev/null || command -v tmux-paste-dispatch.sh 2>/dev/null); then
+    emit ok "flashpaste installed" "$path" 110
+  elif [ -x "$HOME/.local/bin/tmux-paste-dispatch.sh" ]; then
     emit ok "flashpaste installed" "$HOME/.local/bin/tmux-paste-dispatch.sh" 110
   else
     emit warn "flashpaste installed" "not yet — bootstrap.sh / install.sh will fix this" 110

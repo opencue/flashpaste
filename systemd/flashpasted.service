@@ -6,7 +6,7 @@ PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/flashpasted
+ExecStart=/usr/bin/flashpasted
 Restart=on-failure
 RestartSec=2
 Environment=RUST_LOG=info

@@ -17,10 +17,10 @@ See AGENTS.md for the full contributor + release workflow.
 
 ## Checklist
 
-- [ ] `bash -n bin/*.sh install.sh bootstrap.sh` passes
-- [ ] `cargo build --release --manifest-path rs/Cargo.toml` passes (if any Rust changed)
+- [ ] Bash syntax + shellcheck pass through the `Lint` workflow
+- [ ] `cargo build --release --locked --manifest-path rs/Cargo.toml` passes (if any Rust changed)
 - [ ] `cargo fmt --manifest-path rs/Cargo.toml --check` passes (if any Rust changed)
-- [ ] `cargo clippy --release --manifest-path rs/Cargo.toml -- -D warnings` passes (if any Rust changed)
+- [ ] `cargo clippy --release --locked --manifest-path rs/Cargo.toml -- -D warnings` passes (if any Rust changed)
 - [ ] `flashpaste-doctor` runs clean against the changes
 - [ ] If this is a `vX.Y` bump: tag pushed in the same turn (see [AGENTS.md](../AGENTS.md))
 - [ ] `CHANGELOG.md` updated under `## [Unreleased]`

@@ -26,9 +26,35 @@ git fetch origin --tags --quiet 2>/dev/null || true
 missing_tags=0
 missing_releases=0
 
+historical_exception() {
+  local tag="$1" sha="$2"
+  # v1.10-v1.14 predate the release workflow and are explicitly documented in
+  # AGENTS.md as no-backfill-by-default history.
+  case "$tag" in
+    v1.10|v1.11|v1.12|v1.13|v1.14)
+      return 0
+      ;;
+  esac
+  # Early post-policy history contains duplicate version subjects. The tag for
+  # each version points at the canonical release commit; these older subjects
+  # are preserved in git history but must not keep every future audit red.
+  case "$tag:$sha" in
+    v1.18:378a91620eb690ccf9469dbf4e24c55f0a637fba|\
+    v1.20:02aaed161dddc3536f655dcfb65707b7b5613139|\
+    v1.21:72c4845f962221feb1ddf7719279b478f65cb170)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 # Walk every commit whose subject starts with `vX.Y[.Z]:`.
 while IFS=$'\t' read -r sha subject; do
   tag=$(printf '%s' "$subject" | awk '{print $1}' | tr -d ':')
+  if historical_exception "$tag" "$sha"; then
+    [ "$VERBOSE" = "1" ] && printf 'SKIP            %s  %s  historical exception\n' "$tag" "$sha"
+    continue
+  fi
   # The tag must (a) exist locally and (b) point at this same commit.
   if ! git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null; then
     printf 'MISSING TAG     %s  %s\n' "$tag" "$sha"

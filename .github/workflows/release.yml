@@ -39,18 +39,21 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             rs/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('rs/Cargo.toml', 'rs/**/Cargo.toml') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rs/Cargo.lock', 'rs/Cargo.toml', 'rs/**/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
       - name: Build Rust workspace
-        run: cargo build --release --manifest-path rs/Cargo.toml
+        run: cargo build --release --locked --manifest-path rs/Cargo.toml
 
       - name: Build overlay daemon
-        run: cargo build --release --manifest-path rs/Cargo.toml -p flashpaste-overlayd --features wayland
+        run: cargo build --release --locked --manifest-path rs/Cargo.toml -p flashpaste-overlayd --features wayland
 
       - name: Build .deb
         run: VERSION=${{ steps.ver.outputs.v }} bash packaging/build-deb.sh
+
+      - name: Package smoke test
+        run: bash packaging/package-smoke.sh
 
       - name: Show package info
         run: |
@@ -64,5 +67,6 @@ jobs:
         run: |
           gh release create "${GITHUB_REF_NAME}" \
             dist/flashpaste_${{ steps.ver.outputs.v }}_all.deb \
+            dist/flashpaste_all.deb \
             --title "flashpaste ${GITHUB_REF_NAME}" \
             --generate-notes

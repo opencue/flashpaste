@@ -3,10 +3,8 @@
 //!
 //! Target: <40ms paste-to-byte latency (bash baseline ~127ms).
 //!
-//! See `/home/deadpool/Documents/flashpaste/bin/tmux-paste-dispatch.sh`
-//! for the canonical behaviour we are matching. The four hard-won facts
-//! from the bash edit log are preserved here — see comments on each
-//! flow step.
+//! Mirrors `bin/tmux-paste-dispatch.sh`. The four hard-won facts from the
+//! bash edit log are preserved here — see comments on each flow step.
 
 use std::path::PathBuf;
 use std::process::{Command, ExitCode, Stdio};
@@ -168,7 +166,8 @@ fn dispatch(pane: &str) -> Result<()> {
     //    area of this Phase 1 binary small.
     t!("fallback-to-bash");
     tracing::info!("no fresh screenshot — invoking bash slow path");
-    let slow_path = std::path::PathBuf::from("/home/deadpool/.local/bin/tmux-paste-dispatch.sh");
+    let slow_path = paths::bash_dispatcher_path()
+        .ok_or_else(|| anyhow::anyhow!("tmux-paste-dispatch fallback not found on PATH"))?;
     let status = Command::new(&slow_path)
         .arg(pane)
         .stdin(Stdio::null())

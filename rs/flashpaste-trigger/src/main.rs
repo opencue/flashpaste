@@ -7,10 +7,9 @@
 //! recursion guard) and replies in ~10ms.
 //!
 //! If the socket doesn't exist OR the connect/handshake fails within ~5ms,
-//! we `exec` (replace ourselves with) the bash dispatcher at
-//! `/home/deadpool/.local/bin/tmux-paste-dispatch.sh`. That way the trigger
-//! is always safe to wire into tmux even when the daemon is dead or being
-//! restarted.
+//! we `exec` (replace ourselves with) the bash dispatcher found via PATH or
+//! `FLASHPASTE_BASH_FALLBACK`. That way the trigger is always safe to wire
+//! into tmux even when the daemon is dead or being restarted.
 //!
 //! Hard constraints from the spec:
 //!   * Minimal deps — clap, serde_json, nix, anyhow. No tokio. No x11rb.
@@ -33,6 +32,7 @@
 
 use std::ffi::OsString;
 use std::io::{Read, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -58,9 +58,6 @@ fn socket_path() -> PathBuf {
     }
     PathBuf::from("/tmp").join("flashpaste.sock")
 }
-
-/// The bash dispatcher we hand off to when the daemon is unavailable.
-const BASH_FALLBACK: &str = "/home/deadpool/.local/bin/tmux-paste-dispatch.sh";
 
 /// Total budget for "is the daemon there and willing to take this paste?"
 /// Anything slower and we'd rather fall through to bash than hang the user.
@@ -390,7 +387,11 @@ fn base64_encode(data: &[u8]) -> String {
 /// Replace this process with the bash dispatcher. Zero overhead — the
 /// trigger binary's pid simply becomes the bash script.
 fn exec_bash_fallback(pane: &str) -> ! {
-    let mut cmd = Command::new(BASH_FALLBACK);
+    let Some(fallback) = bash_fallback_path() else {
+        eprintln!("flashpaste-trigger: tmux-paste-dispatch fallback not found");
+        std::process::exit(127);
+    };
+    let mut cmd = Command::new(&fallback);
     cmd.arg(pane);
     // Propagate the trigger source so the bash script's logs distinguish
     // "real ctrl-v" from "daemon punted".
@@ -398,16 +399,56 @@ fn exec_bash_fallback(pane: &str) -> ! {
         .unwrap_or_else(|| OsString::from("flashpaste-trigger-fallback"));
     cmd.env("TMUX_PASTE_TRIGGER", trigger_value);
 
-    // If the bash script doesn't exist, exit 0 silently rather than spam
-    // tmux's command output. The trigger is best-effort.
-    if !Path::new(BASH_FALLBACK).exists() {
-        std::process::exit(0);
-    }
-
     // `exec` only returns on error.
     let err = cmd.exec();
-    eprintln!("flashpaste-trigger: exec {} failed: {}", BASH_FALLBACK, err);
+    eprintln!(
+        "flashpaste-trigger: exec {} failed: {}",
+        fallback.display(),
+        err
+    );
     std::process::exit(127);
+}
+
+fn bash_fallback_path() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("FLASHPASTE_BASH_FALLBACK") {
+        if !path.is_empty() {
+            let candidate = PathBuf::from(path);
+            if is_executable_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    find_on_path(&["tmux-paste-dispatch", "tmux-paste-dispatch.sh"]).or_else(|| {
+        let mut candidates = Vec::new();
+        if let Some(home) = std::env::var_os("HOME") {
+            let local_bin = PathBuf::from(home).join(".local").join("bin");
+            candidates.push(local_bin.join("tmux-paste-dispatch"));
+            candidates.push(local_bin.join("tmux-paste-dispatch.sh"));
+        }
+        candidates.push(PathBuf::from("/usr/bin/tmux-paste-dispatch"));
+        candidates
+            .into_iter()
+            .find(|candidate| is_executable_file(candidate))
+    })
+}
+
+fn find_on_path(names: &[&str]) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        for name in names {
+            let candidate = dir.join(name);
+            if is_executable_file(&candidate) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
 }
 
 /// Minimal ISO-8601 UTC formatter — keeps us off the `chrono` / `time`

@@ -27,7 +27,8 @@ use std::ffi::OsString;
 use std::process::{Command, ExitStatus};
 
 use anyhow::{Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand};
+use flashpaste_common::paths;
 
 const FLASHPASTE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -48,6 +49,7 @@ behind a single verb. Memorize one command instead of six.
 Examples:
   flashpaste shoot --interactive --print-path
   flashpaste paste %4
+  flashpaste paths --bash-dispatcher
   flashpaste daemon status
   flashpaste doctor
   flashpaste mcp
@@ -82,6 +84,9 @@ enum Cmd {
 
     /// Run the Rust one-shot dispatcher (Tier 2; wraps `flashpaste-dispatch`).
     Dispatch(DispatchArgs),
+
+    /// Print resolved runtime paths for scripts, snippets, and packagers.
+    Paths(PathsArgs),
 
     /// Print the flashpaste build version and exit.
     Version,
@@ -141,6 +146,27 @@ struct DispatchArgs {
     pane: String,
 }
 
+#[derive(Debug, Args)]
+#[command(group(
+    ArgGroup::new("selector")
+        .required(true)
+        .multiple(false)
+        .args(["bash_dispatcher", "paste_image", "systemd_unit_mode"])
+))]
+struct PathsArgs {
+    /// Resolve the durable bash dispatcher fallback.
+    #[arg(long)]
+    bash_dispatcher: bool,
+
+    /// Resolve the legacy kitty paste-image helper.
+    #[arg(long)]
+    paste_image: bool,
+
+    /// Print the supported systemd unit mode (`user`).
+    #[arg(long)]
+    systemd_unit_mode: bool,
+}
+
 // ─────────────────────────────────────────────────────────────────────────
 // main / dispatch
 // ─────────────────────────────────────────────────────────────────────────
@@ -155,6 +181,10 @@ fn main() -> Result<()> {
         Cmd::Doctor(args) => run_doctor(args)?,
         Cmd::Mcp => run_mcp()?,
         Cmd::Dispatch(args) => run_dispatch(args)?,
+        Cmd::Paths(args) => {
+            run_paths(args)?;
+            return Ok(());
+        }
         Cmd::Version => {
             println!("flashpaste {FLASHPASTE_VERSION}");
             return Ok(());
@@ -249,6 +279,23 @@ fn run_dispatch(args: DispatchArgs) -> Result<ExitStatus> {
     let mut cmd = Command::new("flashpaste-dispatch");
     cmd.arg(args.pane);
     spawn("flashpaste-dispatch", cmd)
+}
+
+fn run_paths(args: PathsArgs) -> Result<()> {
+    if args.bash_dispatcher {
+        print_path("tmux-paste-dispatch", paths::bash_dispatcher_path())?;
+    } else if args.paste_image {
+        print_path("paste_image.sh", paths::paste_image_path())?;
+    } else if args.systemd_unit_mode {
+        println!("{}", paths::systemd_unit_mode());
+    }
+    Ok(())
+}
+
+fn print_path(label: &str, path: Option<std::path::PathBuf>) -> Result<()> {
+    let path = path.ok_or_else(|| anyhow::anyhow!("{label} not found"))?;
+    println!("{}", path.display());
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────

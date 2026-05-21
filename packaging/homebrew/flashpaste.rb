@@ -9,10 +9,10 @@
 class Flashpaste < Formula
   desc "Sub-15ms image-paste glue for terminal AI agents on GNOME Wayland"
   homepage "https://github.com/NagyVikt/flashpaste"
-  url "https://github.com/NagyVikt/flashpaste/archive/refs/tags/v1.32.tar.gz"
+  url "https://github.com/NagyVikt/flashpaste/archive/refs/tags/v1.34.tar.gz"
   # PLACEHOLDER — replace on each release:
   #   curl -sL https://github.com/NagyVikt/flashpaste/archive/refs/tags/v<ver>.tar.gz | sha256sum
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  sha256 "b0a283f7d8bf816d72ba25e62c1eabc796a2b248ef50183656afe486288959b6"
   license "MIT"
   head "https://github.com/NagyVikt/flashpaste.git", branch: "main"
 
@@ -52,7 +52,7 @@ class Flashpaste < Formula
       bin.install src => dest_name
     end
     # Extension-less helpers already named correctly:
-    %w[wl-paste screenshot-to-clipboard].each do |name|
+    %w[wl-paste screenshot-to-clipboard flashpaste-capture-clip].each do |name|
       src = "bin/#{name}"
       bin.install src if File.exist?(src)
     end
@@ -61,10 +61,15 @@ class Flashpaste < Formula
     pkgshare.install "bin/paste_image.sh"
 
     # systemd user units — brew won't manage these, but ship them so users
-    # can `ln -s "$(brew --prefix)/share/flashpaste/systemd/*.service" \
-    #         ~/.config/systemd/user/`.
-    (pkgshare/"systemd").install Dir["systemd/*.service"]
-    (pkgshare/"systemd").install Dir["systemd/*.path"]
+    # can symlink them into ~/.config/systemd/user/. Patch ExecStart paths to
+    # Homebrew's opt prefix rather than /usr/bin.
+    (pkgshare/"systemd").mkpath
+    Dir["systemd/*.service", "systemd/*.path"].each do |src|
+      text = File.read(src)
+      text.gsub!("ExecStart=/usr/bin/", "ExecStart=#{opt_bin}/")
+      text.gsub!("ExecStart=%h/.local/bin/", "ExecStart=#{opt_bin}/")
+      (pkgshare/"systemd"/File.basename(src)).write(text)
+    end
 
     # Desktop entries (most useful on a non-brew install, but ship for parity).
     (pkgshare/"applications").install Dir["share/applications/*.desktop"]
