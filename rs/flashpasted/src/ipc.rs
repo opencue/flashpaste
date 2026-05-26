@@ -228,6 +228,59 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
         }
     }
 
+    // ─── Eager live-clipboard image pickup ────────────────────────────
+    // Bridges "browser Copy Image" — Firefox/Chrome under Wayland write
+    // image bytes to the clipboard with no file under
+    // ~/Pictures/Screenshots/, so the inotify watcher and the
+    // newest-file scan above both miss them. Probe the live clipboard
+    // here; if it advertises an image whose bytes differ from whatever
+    // we have staged (or nothing's staged), stage them now. From this
+    // point the existing X11/Wayland ownership path serves Claude
+    // exactly the same way it does for inotify-staged screenshots.
+    //
+    // Cost on the happy path (no image on clipboard): one wl-clipboard
+    // MIME probe (~5 ms) + xclip TARGETS probe (~10 ms) = ~15 ms.
+    // Cost when capturing a 1 MB browser image: probe + read +
+    // magic-check ~40–80 ms. Throttled to the same hot-path window as
+    // the screenshots-dir scan so paste spam doesn't fan out probes.
+    if should_probe_live_image(state) {
+        if let Some((bytes, mime)) = read_clipboard_image_if_present().await {
+            let differs = match state.staged_snapshot().await {
+                Some(StagedSelection::Image(img)) => img.bytes.as_slice() != bytes.as_slice(),
+                _ => true,
+            };
+            if differs {
+                let len = bytes.len();
+                // Synthetic path so downstream logging / Aider delivery
+                // have a stable name. Use the screenshots dir when one
+                // is configured so the file root is predictable.
+                let path = state
+                    .config
+                    .screenshots_dir
+                    .clone()
+                    .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+                    .join(match mime {
+                        "image/jpeg" => "flashpaste-clip-live.jpg",
+                        "image/webp" => "flashpaste-clip-live.webp",
+                        _ => "flashpaste-clip-live.png",
+                    });
+                let img = StagedImage {
+                    bytes: Arc::new(bytes),
+                    mime,
+                    path,
+                    captured_at: std::time::SystemTime::now(),
+                };
+                info!(
+                    pane,
+                    bytes = len,
+                    mime,
+                    "paste: captured live clipboard image (browser Copy Image bridge)"
+                );
+                state.set_staged_image(img).await;
+            }
+        }
+    }
+
     // ─── Intent: text or image (most-recent staged wins) ──────────────
     // The staged-selection slot is single-valued (set_staged_image
     // replaces text and vice versa), so whatever's in the slot is the
@@ -440,6 +493,13 @@ fn should_probe_external_text(state: &SharedState) -> bool {
     )
 }
 
+fn should_probe_live_image(state: &SharedState) -> bool {
+    throttle_ms(
+        &state.last_live_image_probe_ms,
+        crate::tmux::HOT_PATH_PROBE_THROTTLE_MS,
+    )
+}
+
 fn throttle_ms(slot: &std::sync::atomic::AtomicU64, min_interval_ms: u64) -> bool {
     let now = now_unix_ms();
     let last = slot.load(Ordering::Relaxed);
@@ -564,6 +624,147 @@ async fn read_wayland_text_if_present() -> Option<Vec<u8>> {
 
 fn is_text_target(target: &str) -> bool {
     matches!(target, "UTF8_STRING" | "STRING" | "TEXT") || target.starts_with("text/plain")
+}
+
+/// Read raw image bytes off the live clipboard if (and only if) image MIME
+/// is advertised and the returned bytes pass a magic-byte check. Wayland
+/// first, X11 fallback. Returns `(bytes, mime)` on success.
+///
+/// Bridges the "browser Copy Image" case: Firefox/Chrome right-click →
+/// "Copy Image" puts bytes on the clipboard with no file write, so the
+/// daemon's inotify path on `~/Pictures/Screenshots/` never sees them.
+/// Before this probe, the only fix was the `flashpaste-capture-clip`
+/// shell shim called from `~/paste_image.sh` — but the kitty Ctrl+V
+/// binding short-circuits to `flashpaste-trigger` whenever the user is
+/// inside tmux, bypassing the shim entirely. Doing the probe here means
+/// the daemon serves the bridge regardless of which path triggered the
+/// paste.
+///
+/// MIME preference is PNG > JPEG > WebP. PNG is universally accepted by
+/// Claude Code; JPEG is what most sites serve photographic content as;
+/// WebP shows up on modern image-heavy sites. We pick the first one the
+/// clipboard actually advertises and trust the magic check downstream
+/// to catch xclip's silent text-fallback (xclip returns text bytes when
+/// the requested MIME isn't really there, which would otherwise stage a
+/// UTF-8 URL as if it were a PNG).
+async fn read_clipboard_image_if_present() -> Option<(Vec<u8>, &'static str)> {
+    const PREFERRED: &[&str] = &["image/png", "image/jpeg", "image/webp"];
+
+    // ─── MIME probe: Wayland ────────────────────────────────────────
+    let wl_types_task = tokio::task::spawn_blocking(|| {
+        use wl_clipboard_rs::paste::{get_mime_types, ClipboardType, Seat};
+        get_mime_types(ClipboardType::Regular, Seat::Unspecified)
+            .ok()
+            .map(|set| set.into_iter().collect::<Vec<String>>())
+            .unwrap_or_default()
+    });
+    let wl_types = tokio::time::timeout(Duration::from_millis(150), wl_types_task)
+        .await
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_default();
+
+    // ─── MIME probe: X11 ────────────────────────────────────────────
+    let x_types: Vec<String> = match tokio::time::timeout(
+        Duration::from_millis(300),
+        tokio::process::Command::new("xclip")
+            .args(["-selection", "clipboard", "-t", "TARGETS", "-o"])
+            .output(),
+    )
+    .await
+    {
+        Ok(Ok(out)) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(|s| s.trim().to_string())
+            .collect(),
+        _ => Vec::new(),
+    };
+
+    let has_image_wl = wl_types.iter().any(|t| t.starts_with("image/"));
+    let has_image_x = x_types.iter().any(|t| t.starts_with("image/"));
+    if !has_image_wl && !has_image_x {
+        return None;
+    }
+
+    // Pick the best MIME advertised on either side.
+    let mime: &'static str = if let Some(m) = PREFERRED.iter().find(|want| {
+        wl_types.iter().any(|t| t == *want) || x_types.iter().any(|t| t == *want)
+    }) {
+        match *m {
+            "image/png" => "image/png",
+            "image/jpeg" => "image/jpeg",
+            "image/webp" => "image/webp",
+            _ => return None,
+        }
+    } else {
+        return None;
+    };
+
+    // ─── Read bytes: Wayland first ──────────────────────────────────
+    let bytes: Option<Vec<u8>> = if has_image_wl {
+        let mime_owned = mime.to_string();
+        let task = tokio::task::spawn_blocking(move || -> Option<Vec<u8>> {
+            use wl_clipboard_rs::paste::{get_contents, ClipboardType, MimeType, Seat};
+            let (mut pipe, _) = get_contents(
+                ClipboardType::Regular,
+                Seat::Unspecified,
+                MimeType::Specific(&mime_owned),
+            )
+            .ok()?;
+            let mut buf = Vec::new();
+            pipe.read_to_end(&mut buf).ok()?;
+            if buf.is_empty() {
+                None
+            } else {
+                Some(buf)
+            }
+        });
+        tokio::time::timeout(Duration::from_millis(500), task)
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten()
+    } else {
+        None
+    };
+
+    // ─── X11 fallback when Wayland returned empty ───────────────────
+    let bytes = match bytes {
+        Some(b) => Some(b),
+        None if has_image_x => match tokio::time::timeout(
+            Duration::from_millis(500),
+            tokio::process::Command::new("xclip")
+                .args(["-selection", "clipboard", "-t", mime, "-o"])
+                .output(),
+        )
+        .await
+        {
+            Ok(Ok(out)) if out.status.success() && !out.stdout.is_empty() => Some(out.stdout),
+            _ => None,
+        },
+        _ => None,
+    };
+
+    let bytes = bytes?;
+    if !image_magic_ok(&bytes, mime) {
+        return None;
+    }
+    Some((bytes, mime))
+}
+
+/// Validate that `bytes` actually starts with the magic prefix of the
+/// declared MIME. Without this, xclip's silent text-fallback or a
+/// truncated read could stage a text blob as a PNG. Identical in spirit
+/// to the magic check in `bin/flashpaste-capture-clip`.
+fn image_magic_ok(bytes: &[u8], mime: &str) -> bool {
+    match mime {
+        "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "image/jpeg" => bytes.starts_with(b"\xff\xd8\xff"),
+        "image/webp" => {
+            bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP"
+        }
+        _ => false,
+    }
 }
 
 async fn handle_stage(state: &Arc<SharedState>, image_path: &str) -> Value {

@@ -196,6 +196,12 @@ pub struct SharedState {
     /// Last live X11 text probe. External clipboard checks are useful, but
     /// repeated paste presses should not shell out to xclip every time.
     pub last_external_text_probe_ms: AtomicU64,
+    /// Last live-clipboard image probe. Used by `handle_paste` to bridge
+    /// the "browser Copy Image" case (Firefox/Chrome write bytes to the
+    /// clipboard with no file write, so the inotify path misses them).
+    /// Throttled because each probe forks `xclip` and may also do a
+    /// blocking wl-clipboard read.
+    pub last_live_image_probe_ms: AtomicU64,
 }
 
 impl SharedState {
@@ -214,6 +220,7 @@ impl SharedState {
             last_claim_request_image_ms: AtomicU64::new(0),
             last_screenshot_scan_ms: AtomicU64::new(0),
             last_external_text_probe_ms: AtomicU64::new(0),
+            last_live_image_probe_ms: AtomicU64::new(0),
         }
     }
 
