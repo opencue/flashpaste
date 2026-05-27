@@ -130,7 +130,7 @@ RestartSec=2
 Environment=RUST_LOG=info
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
 EOF
 systemctl --user daemon-reload
 systemctl --user enable --now flashpasted.service
