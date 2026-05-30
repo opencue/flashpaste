@@ -208,7 +208,7 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
                         "paste: fresh Wayland text suppressed eager screenshot pickup"
                     );
                     state.set_staged_text(s).await;
-                } else if let Ok(bytes) = std::fs::read(&fresh_path) {
+                } else if let Ok(bytes) = tokio::fs::read(&fresh_path).await {
                     let len = bytes.len();
                     let new_img = StagedImage {
                         bytes: Arc::new(bytes),
@@ -542,7 +542,7 @@ async fn handle_stage_text(state: &Arc<SharedState>, bytes_b64: &str) -> Value {
 ///   * any `image/*` target is advertised (the daemon's own image win)
 ///   * no text target is advertised
 ///   * xclip text read returns empty bytes
-async fn read_clipboard_text_if_present() -> Option<Vec<u8>> {
+pub(crate) async fn read_clipboard_text_if_present() -> Option<Vec<u8>> {
     // First pass: TARGETS. Only proceed if it's text-only.
     let targets_out = tokio::process::Command::new("xclip")
         .args(["-selection", "clipboard", "-t", "TARGETS", "-o"])
@@ -647,7 +647,7 @@ fn is_text_target(target: &str) -> bool {
 /// to catch xclip's silent text-fallback (xclip returns text bytes when
 /// the requested MIME isn't really there, which would otherwise stage a
 /// UTF-8 URL as if it were a PNG).
-async fn read_clipboard_image_if_present() -> Option<(Vec<u8>, &'static str)> {
+pub(crate) async fn read_clipboard_image_if_present() -> Option<(Vec<u8>, &'static str)> {
     const PREFERRED: &[&str] = &["image/png", "image/jpeg", "image/webp"];
 
     // ─── MIME probe: Wayland ────────────────────────────────────────

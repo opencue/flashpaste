@@ -17,6 +17,7 @@
 //!    and auto-stages the bytes into both clipboard owners.
 
 mod agent;
+mod clip_watch;
 mod inotify_watch;
 mod ipc;
 mod kitty;
@@ -133,6 +134,14 @@ async fn run(state: Arc<SharedState>, args: Args) -> Result<()> {
         inotify_watch::spawn_watcher(state.clone());
     } else {
         warn!("inotify disabled by --no-inotify");
+    }
+
+    // 4b) Opt-in push-model clipboard pre-stager. Off unless
+    //     FLASHPASTE_CLIPBOARD_WATCH=1 — when on, it moves the paste-time
+    //     clipboard probe off the keystroke path by staging external copies
+    //     in the background. Additive: never touches the X11/Wayland owners.
+    if clip_watch::enabled() {
+        clip_watch::spawn(state.clone());
     }
 
     // 5) Wait for shutdown signal.

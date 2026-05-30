@@ -56,7 +56,40 @@ pub async fn dispatch_image_paste(
     let _ = state.stage_notifier_tx.send(now_unix_ms());
 
     let snap = tmux::pane_snapshot(&pane).await;
-    let agent = agent::detect(&pane, &snap).await;
+    let agent = agent::detect_cached(&state.agent_cache, &pane, &snap).await;
+
+    // Experimental (opt-in via FLASHPASTE_IMAGE_AS_PATH=1): instead of the
+    // X11-reclaim + Ctrl-V + clipboard-read dance, write the staged image to
+    // a stable file and inject its PATH through the fast text path. Claude
+    // Code / Codex can attach an image referenced by path, turning a ~38 ms
+    // image paste into a ~text-speed one and skipping the clipboard entirely.
+    //
+    // Off by default: whether the TUI auto-attaches from a bare pasted path
+    // is version-dependent, so this is a flag the user flips on if it works
+    // for their build rather than a behaviour change everyone inherits.
+    if image_as_path_enabled() && matches!(agent, AgentKind::ClaudeCode | AgentKind::Codex) {
+        let image_path = agent::materialize_readable_path(&staged)
+            .await
+            .context("materialize image path for path-paste")?;
+        let mut line = std::os::unix::ffi::OsStrExt::as_bytes(image_path.as_os_str()).to_vec();
+        line.push(b' ');
+        let text = StagedText {
+            bytes: Arc::new(line),
+            captured_at: std::time::SystemTime::now(),
+        };
+        dispatch_text_paste(state.clone(), pane.clone(), text).await?;
+        info!(
+            pane,
+            kind = "image",
+            agent = agent.as_str(),
+            payload_bytes,
+            payload_name = %payload_name,
+            path = %image_path.display(),
+            "PASTED image as path (FLASHPASTE_IMAGE_AS_PATH)"
+        );
+        return Ok(());
+    }
+
     if agent == AgentKind::Aider {
         let image_path = agent::deliver_aider_image(&pane, &staged)
             .await
@@ -109,36 +142,58 @@ pub async fn dispatch_text_paste(
 ) -> Result<()> {
     let bytes_len = text.bytes.len();
 
-    // Load text into tmux buffer 'fp_text' via stdin.
-    let mut load = tokio::process::Command::new("tmux")
-        .args(["load-buffer", "-b", "fp_text", "-"])
+    // Single tmux fork: `load-buffer - ; paste-buffer` chained with tmux's
+    // `;` command separator. tmux runs both commands in one process — the
+    // load reads our text from stdin, then the paste writes the buffer into
+    // the target pane. Halves the fork count of the hot text path (was two
+    // separate `tmux` spawns). `-p` keeps bracketed paste for multi-line
+    // safety. Passing `;` as its own argv entry (no shell) is how tmux sees
+    // a command separator when exec'd directly.
+    let mut child = tokio::process::Command::new("tmux")
+        .args([
+            "load-buffer",
+            "-b",
+            "fp_text",
+            "-",
+            ";",
+            "paste-buffer",
+            "-p",
+            "-b",
+            "fp_text",
+            "-t",
+            &pane,
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .context("spawn tmux load-buffer")?;
+        .context("spawn tmux load-buffer;paste-buffer")?;
     {
-        let mut stdin = load.stdin.take().context("load-buffer stdin not piped")?;
+        let mut stdin = child.stdin.take().context("tmux stdin not piped")?;
         stdin
             .write_all(&text.bytes)
             .await
-            .context("write load-buffer stdin")?;
+            .context("write tmux stdin")?;
     }
-    let load_status = load.wait().await.context("load-buffer wait")?;
-    if !load_status.success() {
-        anyhow::bail!("tmux load-buffer non-zero: {:?}", load_status);
-    }
-
-    // Paste into the target pane (bracketed paste for multi-line safety).
-    let paste_status = tokio::process::Command::new("tmux")
-        .args(["paste-buffer", "-p", "-b", "fp_text", "-t", &pane])
-        .status()
-        .await
-        .context("spawn tmux paste-buffer")?;
-    if !paste_status.success() {
-        anyhow::bail!("tmux paste-buffer non-zero: {:?}", paste_status);
+    let status = child.wait().await.context("tmux load;paste wait")?;
+    if !status.success() {
+        anyhow::bail!("tmux load-buffer;paste-buffer non-zero: {:?}", status);
     }
 
     info!(pane, kind = "text", bytes = bytes_len, "PASTED text");
     Ok(())
+}
+
+/// Opt-in switch for the image-as-path fast path. Reads `FLASHPASTE_IMAGE_AS_PATH`
+/// once per paste — cheap, and lets the user toggle it without restarting if
+/// the daemon is launched through a wrapper that re-reads the env. Truthy
+/// values: `1`, `true`, `yes`, `on` (case-insensitive).
+fn image_as_path_enabled() -> bool {
+    std::env::var("FLASHPASTE_IMAGE_AS_PATH")
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            matches!(v.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(false)
 }

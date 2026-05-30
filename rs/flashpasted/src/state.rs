@@ -202,6 +202,12 @@ pub struct SharedState {
     /// Throttled because each probe forks `xclip` and may also do a
     /// blocking wl-clipboard read.
     pub last_live_image_probe_ms: AtomicU64,
+    /// Memo of `pane_id -> agent kind`. The dispatch path classifies the
+    /// foreground agent on every paste; for Claude Code panes that forces a
+    /// `ps` descendant walk (the snapshot's `current_command` is `node`/`bun`,
+    /// never a bare `claude`). The cache keeps the walk to once per agent
+    /// lifetime, re-deriving only when the pane's command or pid changes.
+    pub agent_cache: crate::agent::AgentCache,
 }
 
 impl SharedState {
@@ -221,6 +227,7 @@ impl SharedState {
             last_screenshot_scan_ms: AtomicU64::new(0),
             last_external_text_probe_ms: AtomicU64::new(0),
             last_live_image_probe_ms: AtomicU64::new(0),
+            agent_cache: crate::agent::new_cache(),
         }
     }
 

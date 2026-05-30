@@ -7,7 +7,9 @@
 //! from inside the chat. This module keeps that difference explicit without
 //! disturbing the existing Claude/Codex path.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use tokio::process::Command;
@@ -37,11 +39,41 @@ impl AgentKind {
     }
 }
 
-/// Detect the foreground agent in `pane`.
+/// One cached agent classification for a pane. Invalidated when the pane's
+/// foreground command or root pid changes — both are free byproducts of the
+/// `pane_snapshot` the dispatch path already takes.
+#[derive(Clone)]
+pub struct CachedAgent {
+    pane_pid: Option<u32>,
+    current_command: String,
+    kind: AgentKind,
+}
+
+/// Per-daemon memo of `pane_id -> agent kind`. Lives on `SharedState`.
+pub type AgentCache = Mutex<HashMap<String, CachedAgent>>;
+
+/// Build an empty agent cache.
+pub fn new_cache() -> AgentCache {
+    Mutex::new(HashMap::new())
+}
+
+/// Detect the foreground agent in `pane`, memoizing through `cache`.
 ///
-/// This is best-effort and deliberately conservative: unknown or ambiguous
-/// panes return Generic, which preserves the legacy Ctrl-V path.
-pub async fn detect(_pane: &str, snap: &PaneSnapshot) -> AgentKind {
+/// Best-effort and deliberately conservative: unknown or ambiguous panes
+/// return Generic, which preserves the legacy Ctrl-V path.
+///
+/// Skips the `ps` descendant walk — the expensive part (5–10 ms on a busy
+/// box) — when the pane's `(pane_pid, current_command)` are unchanged since
+/// the last classification. Claude Code panes report `current_command` as
+/// `node`/`bun`, which never matches the cheap direct classifier, so before
+/// this every paste forked `ps`.
+///
+/// Invalidation is exact, not TTL-based: if the user swaps the agent running
+/// in a pane, `current_command` (and usually `pane_pid`) changes, so the
+/// stale entry is ignored and re-derived. The env override and the cheap
+/// direct classifier still run first, so an explicit `FLASHPASTE_AGENT` or a
+/// bare `claude`/`codex`/`aider` foreground command never touches the cache.
+pub async fn detect_cached(cache: &AgentCache, pane: &str, snap: &PaneSnapshot) -> AgentKind {
     if let Some(kind) = forced_agent_from_env() {
         return kind;
     }
@@ -50,15 +82,46 @@ pub async fn detect(_pane: &str, snap: &PaneSnapshot) -> AgentKind {
         return kind;
     }
 
-    let Some(root_pid) = snap.pane_pid else {
-        return AgentKind::Generic;
+    if let Some(kind) = cache_get(cache, pane, snap) {
+        return kind;
+    }
+
+    let kind = match snap.pane_pid {
+        Some(root_pid) => match descendant_args(root_pid).await {
+            Ok(descendants) => detect_from_process_lines(&descendants),
+            Err(_) => AgentKind::Generic,
+        },
+        None => AgentKind::Generic,
     };
 
-    let Ok(descendants) = descendant_args(root_pid).await else {
-        return AgentKind::Generic;
-    };
+    cache_put(cache, pane, snap, kind);
+    kind
+}
 
-    detect_from_process_lines(&descendants)
+/// Cache hit only when the pane's foreground command AND root pid both match
+/// what was classified last time — either changing means a different process
+/// tree, so the memo is stale.
+fn cache_get(cache: &AgentCache, pane: &str, snap: &PaneSnapshot) -> Option<AgentKind> {
+    let guard = cache.lock().ok()?;
+    let entry = guard.get(pane)?;
+    if entry.pane_pid == snap.pane_pid && entry.current_command == snap.current_command {
+        Some(entry.kind)
+    } else {
+        None
+    }
+}
+
+fn cache_put(cache: &AgentCache, pane: &str, snap: &PaneSnapshot, kind: AgentKind) {
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(
+            pane.to_string(),
+            CachedAgent {
+                pane_pid: snap.pane_pid,
+                current_command: snap.current_command.clone(),
+                kind,
+            },
+        );
+    }
 }
 
 /// Deliver to Aider via its in-chat `/add <path>` command.
@@ -257,7 +320,7 @@ fn descendant_args_from_ps(root_pid: u32, ps_output: &str) -> Vec<String> {
         .collect()
 }
 
-async fn materialize_readable_path(staged: &StagedImage) -> Result<PathBuf> {
+pub async fn materialize_readable_path(staged: &StagedImage) -> Result<PathBuf> {
     let dir = agent_stage_dir();
     tokio::fs::create_dir_all(&dir)
         .await
@@ -324,6 +387,35 @@ mod tests {
     fn prefers_aider_over_model_argument() {
         let lines = vec!["python3 -m aider --model codex".to_string()];
         assert_eq!(detect_from_process_lines(&lines), AgentKind::Aider);
+    }
+
+    fn snap(pid: Option<u32>, cmd: &str) -> PaneSnapshot {
+        PaneSnapshot {
+            pane_pid: pid,
+            mode: String::new(),
+            current_command: cmd.to_string(),
+        }
+    }
+
+    #[test]
+    fn agent_cache_hits_when_pid_and_command_match() {
+        let cache = new_cache();
+        let s = snap(Some(42), "node");
+        assert_eq!(cache_get(&cache, "%1", &s), None);
+        cache_put(&cache, "%1", &s, AgentKind::ClaudeCode);
+        assert_eq!(cache_get(&cache, "%1", &s), Some(AgentKind::ClaudeCode));
+    }
+
+    #[test]
+    fn agent_cache_invalidates_on_command_or_pid_change() {
+        let cache = new_cache();
+        cache_put(&cache, "%1", &snap(Some(42), "node"), AgentKind::ClaudeCode);
+        // Same pane, foreground command changed (agent exited → bash): miss.
+        assert_eq!(cache_get(&cache, "%1", &snap(Some(42), "bash")), None);
+        // Same pane, command but new root pid (pane recreated): miss.
+        assert_eq!(cache_get(&cache, "%1", &snap(Some(99), "node")), None);
+        // Different pane entirely: miss.
+        assert_eq!(cache_get(&cache, "%2", &snap(Some(42), "node")), None);
     }
 
     #[test]

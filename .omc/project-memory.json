@@ -1,0 +1,216 @@
+{
+  "version": "1.0.0",
+  "lastScanned": 1780144758506,
+  "projectRoot": "/home/deadpool/Documents/flashpaste",
+  "techStack": {
+    "languages": [
+      {
+        "name": "C/C++",
+        "version": null,
+        "confidence": "high",
+        "markers": [
+          "Makefile"
+        ]
+      }
+    ],
+    "frameworks": [],
+    "packageManager": null,
+    "runtime": null
+  },
+  "build": {
+    "buildCommand": "cargo build --release 2>&1 | grep -E \"error|Finished\" | head; echo \"=== git status (uncommitted) ===\"; cd /home/deadpool/Documents/flashpaste && git status --short rs/",
+    "testCommand": "make test",
+    "lintCommand": null,
+    "devCommand": null,
+    "scripts": {}
+  },
+  "conventions": {
+    "namingStyle": null,
+    "importStyle": null,
+    "testPattern": null,
+    "fileOrganization": null
+  },
+  "structure": {
+    "isMonorepo": false,
+    "workspaces": [],
+    "mainDirectories": [
+      "assets",
+      "bin",
+      "docs",
+      "examples",
+      "tests"
+    ],
+    "gitBranches": {
+      "defaultBranch": "main",
+      "branchingStrategy": null
+    }
+  },
+  "customNotes": [],
+  "directoryMap": {
+    "assets": {
+      "path": "assets",
+      "purpose": "Static assets",
+      "fileCount": 12,
+      "lastAccessed": 1780144758497,
+      "keyFiles": [
+        "architecture.svg",
+        "badges.svg",
+        "hero-animated.svg",
+        "hero-flow-light.svg",
+        "hero-flow.svg"
+      ]
+    },
+    "bin": {
+      "path": "bin",
+      "purpose": "Executable scripts",
+      "fileCount": 14,
+      "lastAccessed": 1780144758500,
+      "keyFiles": [
+        "clip-pipeline-log.sh",
+        "clipboard-janitor.sh",
+        "clipboard-set.sh",
+        "flashpaste-bench.sh",
+        "flashpaste-capture-clip"
+      ]
+    },
+    "dist": {
+      "path": "dist",
+      "purpose": "Distribution/build output",
+      "fileCount": 4,
+      "lastAccessed": 1780144758500,
+      "keyFiles": [
+        "flashpaste_0.1.0-test_all.deb",
+        "flashpaste_1.14.0_all.deb",
+        "flashpaste_1.16.0_all.deb",
+        "flashpaste_1.32_all.deb"
+      ]
+    },
+    "docs": {
+      "path": "docs",
+      "purpose": "Documentation",
+      "fileCount": 17,
+      "lastAccessed": 1780144758502,
+      "keyFiles": [
+        "README.md",
+        "architecture.md",
+        "comparison.md",
+        "faq.md",
+        "flashpaste-overlayd-plan.md"
+      ]
+    },
+    "examples": {
+      "path": "examples",
+      "purpose": "Example code",
+      "fileCount": 2,
+      "lastAccessed": 1780144758502,
+      "keyFiles": [
+        "kitty.conf.snippet",
+        "tmux.conf.snippet"
+      ]
+    },
+    "openspec": {
+      "path": "openspec",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1780144758503,
+      "keyFiles": []
+    },
+    "packaging": {
+      "path": "packaging",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1780144758503,
+      "keyFiles": [
+        "build-deb.sh",
+        "build-rpm.sh",
+        "package-smoke.sh"
+      ]
+    },
+    "references": {
+      "path": "references",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1780144758503,
+      "keyFiles": []
+    },
+    "rs": {
+      "path": "rs",
+      "purpose": null,
+      "fileCount": 3,
+      "lastAccessed": 1780144758503,
+      "keyFiles": [
+        "Cargo.lock",
+        "Cargo.toml"
+      ]
+    },
+    "share": {
+      "path": "share",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1780144758504,
+      "keyFiles": []
+    },
+    "skills": {
+      "path": "skills",
+      "purpose": null,
+      "fileCount": 0,
+      "lastAccessed": 1780144758504,
+      "keyFiles": []
+    },
+    "systemd": {
+      "path": "systemd",
+      "purpose": null,
+      "fileCount": 5,
+      "lastAccessed": 1780144758505,
+      "keyFiles": [
+        "clipboard-janitor.service",
+        "flashpaste-overlayd.service",
+        "flashpaste-screenshot-watcher.path",
+        "flashpaste-screenshot-watcher.service",
+        "flashpasted.service"
+      ]
+    },
+    "tests": {
+      "path": "tests",
+      "purpose": "Test files",
+      "fileCount": 1,
+      "lastAccessed": 1780144758505,
+      "keyFiles": [
+        "click-through.md"
+      ]
+    }
+  },
+  "hotPaths": [
+    {
+      "path": "rs/flashpasted/src/paste.rs",
+      "accessCount": 4,
+      "lastAccessed": 1780149811358,
+      "type": "file"
+    },
+    {
+      "path": "rs/flashpasted/src/agent.rs",
+      "accessCount": 3,
+      "lastAccessed": 1780149785213,
+      "type": "file"
+    },
+    {
+      "path": "rs/flashpasted/src/tmux.rs",
+      "accessCount": 2,
+      "lastAccessed": 1780149179099,
+      "type": "file"
+    },
+    {
+      "path": "rs/flashpasted/src/ipc.rs",
+      "accessCount": 1,
+      "lastAccessed": 1780144823886,
+      "type": "file"
+    },
+    {
+      "path": "rs/flashpasted/src/state.rs",
+      "accessCount": 1,
+      "lastAccessed": 1780149178166,
+      "type": "file"
+    }
+  ],
+  "userDirectives": []
+}
