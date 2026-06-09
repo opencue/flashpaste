@@ -17,6 +17,11 @@
 #   2026-05-19  shim created with xclip fallback + wedge cache (the
 #               cache suppresses dock flash by skipping real wl-paste
 #               calls while mutter is known-broken).
+#   2026-06-09  image-coexistence guard: when the clipboard carries an
+#               image AND text at once (browser "Copy image" ships
+#               image/png + a text/html <img src=blob:...>), text reads
+#               return NOTHING so Claude attaches the image but never
+#               inserts the raw blob markup / PNG bytes as text.
 # ─────────────────────────────────────────────────────────────────────
 # wl-paste shim — fall back to xclip when the real wl-paste returns empty,
 # AND skip the real wl-paste entirely while mutter is known-wedged so we
@@ -122,6 +127,47 @@ xclip_fallback() {
     exec xclip -selection "$xclip_selection" -o
   fi
 }
+
+# ── Image-coexistence guard ───────────────────────────────────────────
+# When the clipboard carries an image AND text at the same time, a text
+# paste must yield NOTHING — the user wants the image attached, not the
+# text/HTML wrapper that ships beside it. Facebook (and other sites)
+# "Copy image" puts image/png on the clipboard together with a text/html
+# `<img src="blob:...">`; Claude Code reads BOTH on one paste, attaching
+# the image (good) and inserting the raw blob markup as text (the bug).
+# A stale screenshot leaking image bytes onto a text target produced the
+# same class of failure: a wall of raw PNG pasted as text. Mirror the
+# daemon's own policy (read_*_text_if_present returns None when image/*
+# is advertised): if an image is present, text-oriented reads return empty.
+is_text_read=0
+if [ "$list_only" = "0" ]; then
+  case "$target" in
+    "" | UTF8_STRING | STRING | TEXT | text/*) is_text_read=1 ;;
+  esac
+fi
+
+clipboard_has_image() {
+  # X11 side first — flash-free, and the daemon claims image/png here when
+  # it stages a clipboard image, so this catches the common case on this
+  # mutter-wedged box.
+  if xclip -selection "$xclip_selection" -t TARGETS -o 2>/dev/null \
+      | grep -qi '^image/'; then
+    return 0
+  fi
+  # Wayland side — skip while mutter is known-wedged (real wl-paste returns
+  # nothing there anyway and the call only adds a dock flash). When healthy,
+  # the browser is the Wayland owner, so this is where the image shows up.
+  if ! is_wedged_recently; then
+    timeout 0.3 "$REAL_WL_PASTE" -l 2>/dev/null | grep -qi '^image/' && return 0
+  fi
+  return 1
+}
+
+if [ "$is_text_read" = "1" ] && clipboard_has_image; then
+  # Image co-present → suppress the text read (exit like a missing target,
+  # which is exactly what a real wl-paste does when the type isn't there).
+  exit 1
+fi
 
 # Wedge fast-path: if we recently confirmed real wl-paste returns empty,
 # skip it entirely — no dock flash, no 300ms wait.
