@@ -141,6 +141,7 @@ pub async fn dispatch_text_paste(
     text: StagedText,
 ) -> Result<()> {
     let bytes_len = text.bytes.len();
+    let sanitized = sanitize_clipboard_text(&text.bytes);
 
     // Single tmux fork: `load-buffer - ; paste-buffer` chained with tmux's
     // `;` command separator. tmux runs both commands in one process — the
@@ -171,7 +172,7 @@ pub async fn dispatch_text_paste(
     {
         let mut stdin = child.stdin.take().context("tmux stdin not piped")?;
         stdin
-            .write_all(&text.bytes)
+            .write_all(sanitized.as_ref())
             .await
             .context("write tmux stdin")?;
     }
@@ -182,6 +183,278 @@ pub async fn dispatch_text_paste(
 
     info!(pane, kind = "text", bytes = bytes_len, "PASTED text");
     Ok(())
+}
+
+/// Strip HTML markup from clipboard text so that content copied from
+/// browsers (Facebook, product pages, social media) pastes as clean
+/// plain text instead of raw `<span>`, `<div>`, `<img blob:…/>` etc.
+///
+/// Only fires when the text contains an HTML-ish tag opener (`<letter`
+/// or `</`). Plain text, code with `<`/`>` operators, and non-UTF-8
+/// bytes all pass through untouched.
+fn sanitize_clipboard_text(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return std::borrow::Cow::Borrowed(bytes);
+    };
+    if !looks_like_html(text) {
+        return std::borrow::Cow::Borrowed(bytes);
+    }
+    let out = html_to_plaintext(text);
+    if out.as_bytes() == bytes {
+        std::borrow::Cow::Borrowed(bytes)
+    } else {
+        std::borrow::Cow::Owned(out.into_bytes())
+    }
+}
+
+/// Returns true when `text` contains at least one HTML-ish tag opener:
+/// `<letter…` or `</`. A bare `<` followed by whitespace or a digit
+/// (e.g. `x < 5`, `i < len`) does not count.
+fn looks_like_html(text: &str) -> bool {
+    let b = text.as_bytes();
+    b.windows(2)
+        .any(|w| w[0] == b'<' && (w[1].is_ascii_alphabetic() || w[1] == b'/'))
+}
+
+/// Convert HTML to plain text:
+///   - `<br>` / `<br/>` → newline
+///   - block elements (`<p>`, `<div>`, headings, `<li>`, `<tr>`) → newline
+///   - `<img src="blob:…">` → `[domain image]` label (preserves context)
+///   - all other tags stripped
+///   - common HTML entities decoded (`&amp;`, `&nbsp;`, `&lt;`, …)
+///   - runs of 3+ blank lines collapsed to 2
+fn html_to_plaintext(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+
+    while let Some(lt) = rest.find('<') {
+        out.push_str(&rest[..lt]);
+        let from_lt = &rest[lt..];
+
+        let Some(gt_off) = from_lt.find('>') else {
+            // Unclosed tag — emit literally and stop.
+            out.push_str(from_lt);
+            rest = "";
+            break;
+        };
+
+        let inner = &from_lt[1..gt_off];
+        let tag_end = lt + gt_off + 1;
+
+        // Tag name: lowercase, trailing `/` stripped (handles `<br/>`).
+        let raw = inner.trim_start();
+        let name = raw
+            .split_ascii_whitespace()
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let name = name.trim_end_matches('/');
+
+        match name {
+            "br" => out.push('\n'),
+            // Block-level elements: ensure a newline boundary.
+            "p" | "/p" | "div" | "/div" | "section" | "/section" | "article"
+            | "/article" | "li" | "tr" | "/tr" | "h1" | "h2" | "h3" | "h4"
+            | "h5" | "h6" | "/h1" | "/h2" | "/h3" | "/h4" | "/h5" | "/h6" => {
+                if !out.ends_with('\n') && !out.is_empty() {
+                    out.push('\n');
+                }
+            }
+            // Blob-URL images keep a short human-readable label.
+            "img" if inner.contains("blob:") => {
+                out.push_str(&blob_img_label(inner));
+            }
+            // Everything else (span, a, b, strong, em, img without blob:,
+            // script, style …) is silently dropped.
+            _ => {}
+        }
+
+        rest = &rest[tag_end..];
+    }
+
+    out.push_str(rest);
+    let out = decode_html_entities(out);
+    collapse_blank_lines(out)
+}
+
+/// Decode common named and numeric HTML entities.
+fn decode_html_entities(mut text: String) -> String {
+    if !text.contains('&') {
+        return text;
+    }
+    const NAMED: &[(&str, &str)] = &[
+        ("&amp;", "&"),
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&nbsp;", " "),
+        ("&apos;", "'"),
+        ("&quot;", "\""),
+        ("&mdash;", "—"),
+        ("&ndash;", "–"),
+        ("&hellip;", "…"),
+        ("&laquo;", "«"),
+        ("&raquo;", "»"),
+        ("&#39;", "'"),
+        ("&#160;", " "),
+    ];
+    for (entity, rep) in NAMED {
+        if text.contains(entity) {
+            text = text.replace(entity, rep);
+        }
+    }
+    text
+}
+
+/// Collapse runs of 3+ consecutive newlines to 2 and trim leading/trailing
+/// whitespace — removes the blank-line padding that HTML layout adds.
+fn collapse_blank_lines(text: String) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut nl_run: u8 = 0;
+    for ch in text.chars() {
+        if ch == '\n' {
+            nl_run = nl_run.saturating_add(1);
+            if nl_run <= 2 {
+                out.push('\n');
+            }
+        } else {
+            nl_run = 0;
+            out.push(ch);
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Build a short label for a blob-URL `<img>` tag, e.g. `[facebook.com image]`.
+fn blob_img_label(tag: &str) -> String {
+    extract_blob_domain(tag)
+        .map(|d| format!("[{d} image]"))
+        .unwrap_or_else(|| "[image]".to_string())
+}
+
+/// Extract the hostname from a `blob:https://hostname/...` URL inside a tag.
+fn extract_blob_domain(tag: &str) -> Option<String> {
+    let after_blob = tag.split_once("blob:")?.1;
+    let after_scheme = after_blob
+        .strip_prefix("https://")
+        .or_else(|| after_blob.strip_prefix("http://"))
+        .unwrap_or(after_blob);
+    let end = after_scheme
+        .find(|c: char| c == '/' || c == '"' || c == '\'' || c == ' ')
+        .unwrap_or(after_scheme.len());
+    let domain = &after_scheme[..end];
+    if domain.is_empty() {
+        return None;
+    }
+    Some(domain.strip_prefix("www.").unwrap_or(domain).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_text_borrowed_unchanged() {
+        let input = b"just plain text with no tags";
+        assert!(matches!(
+            sanitize_clipboard_text(input),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn less_than_in_code_not_treated_as_html() {
+        // `<` followed by a digit or space is not a tag opener.
+        let input = b"if x < 5 and y > 3 then z";
+        let out = sanitize_clipboard_text(input);
+        assert_eq!(out.as_ref(), input);
+    }
+
+    #[test]
+    fn non_utf8_bytes_passed_through() {
+        let input: &[u8] = &[0xff, 0xfe, b'<', b'i', b'm', b'g'];
+        let out = sanitize_clipboard_text(input);
+        assert_eq!(out.as_ref(), input);
+    }
+
+    #[test]
+    fn blob_img_replaced_with_domain_label() {
+        let input = b"check this <img src=\"blob:https://www.facebook.com/c4a1d5d6\"/> nice";
+        let out = sanitize_clipboard_text(input);
+        assert_eq!(
+            std::str::from_utf8(out.as_ref()).unwrap(),
+            "check this [facebook.com image] nice"
+        );
+    }
+
+    #[test]
+    fn multiple_blob_imgs_all_replaced() {
+        let input = b"a <img src=\"blob:https://www.facebook.com/aaa\"/> b <img src=\"blob:https://www.facebook.com/bbb\"/> c";
+        let out = sanitize_clipboard_text(input);
+        assert_eq!(
+            std::str::from_utf8(out.as_ref()).unwrap(),
+            "a [facebook.com image] b [facebook.com image] c"
+        );
+    }
+
+    #[test]
+    fn regular_img_tag_stripped() {
+        // A non-blob <img> has no meaning outside the browser — strip it.
+        let input = b"before <img src=\"https://example.com/x.jpg\"/> after";
+        let out = sanitize_clipboard_text(input);
+        assert_eq!(std::str::from_utf8(out.as_ref()).unwrap(), "before  after");
+    }
+
+    #[test]
+    fn span_and_inline_tags_stripped() {
+        let input = b"<span class=\"price\"><b>1 800 \xe2\x82\xac</b></span>";
+        let out = sanitize_clipboard_text(input);
+        assert_eq!(std::str::from_utf8(out.as_ref()).unwrap(), "1 800 €");
+    }
+
+    #[test]
+    fn br_becomes_newline() {
+        let input = b"line one<br/>line two<br />line three";
+        let out = sanitize_clipboard_text(input);
+        assert_eq!(
+            std::str::from_utf8(out.as_ref()).unwrap(),
+            "line one\nline two\nline three"
+        );
+    }
+
+    #[test]
+    fn block_elements_add_newlines() {
+        let input = b"<div>first</div><div>second</div>";
+        let out = sanitize_clipboard_text(input);
+        assert_eq!(
+            std::str::from_utf8(out.as_ref()).unwrap(),
+            "first\nsecond"
+        );
+    }
+
+    #[test]
+    fn html_entities_decoded() {
+        // Entities only appear inside HTML; the surrounding tag triggers the
+        // HTML path, which then decodes them.
+        let input = b"<p>price &amp; quality &lt;= great &gt; average&nbsp;yes</p>";
+        let out = sanitize_clipboard_text(input);
+        assert_eq!(
+            std::str::from_utf8(out.as_ref()).unwrap(),
+            "price & quality <= great > average yes"
+        );
+    }
+
+    #[test]
+    fn facebook_product_page_roundtrip() {
+        // Realistic slice of what Facebook copies for a product listing.
+        let input = b"<div><span>Lateral Raise</span><br/><img src=\"blob:https://www.facebook.com/uuid\"/><p>261 kg &amp; 1 800 &euro;</p></div>";
+        let out = sanitize_clipboard_text(input);
+        let s = std::str::from_utf8(out.as_ref()).unwrap();
+        assert!(s.contains("Lateral Raise"));
+        assert!(s.contains("[facebook.com image]"));
+        assert!(s.contains("261 kg & 1 800"));
+        assert!(!s.contains("<"));
+        assert!(!s.contains("blob:"));
+    }
 }
 
 /// Opt-in switch for the image-as-path fast path. Reads `FLASHPASTE_IMAGE_AS_PATH`

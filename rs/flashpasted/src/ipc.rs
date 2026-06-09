@@ -37,7 +37,15 @@ use crate::state::{now_unix_ms, SharedState, StagedImage, StagedSelection, Stage
 /// we widen to 8MB — covers a 6MB clipboard payload comfortably. Anything
 /// larger should hit the daemon via a path field, not inline.
 const MAX_REQUEST_BYTES: u32 = 8 * 1024 * 1024;
-const PASTE_DEDUP_WINDOW_MS: u64 = 350;
+/// How long a paste with an identical `(pane, content)` signature is
+/// suppressed after one is accepted. Sized to swallow the dual-handler
+/// spread (kitty's `map ctrl+v` and tmux's `bind -n C-v` both fire on one
+/// keypress and land ~450–900 ms apart on this box — measured organic
+/// double-pastes of 483 ms and 886 ms in the daemon journal). Because the
+/// guard now keys on pane+content (not time alone), this wider window never
+/// blocks a genuinely different paste — only a verbatim re-fire of the same
+/// bytes into the same pane within ~1 s, which is exactly the bug.
+const PASTE_DEDUP_WINDOW_MS: u64 = 1000;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -374,17 +382,27 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
         // when something calls `flashpaste-trigger --stage-text` (i.e.
         // clipboard-set.sh via tmux's `@clip` pipe on mouse-highlight).
         // When the user copies via kitty's `copy_and_clear_or_interrupt`
-        // (Ctrl+C with a live selection) or any non-tmux app, kitty
-        // writes the bytes straight to the X11 CLIPBOARD and never tells
-        // the daemon. Result: every paste delivers the OLD `staged_text`
-        // even though the live clipboard holds bytes the user just
-        // copied. Probe live X11 — if it differs, prefer X11.
-        let external_text = if should_probe_external_text(state) {
-            read_clipboard_text_if_present().await
-        } else {
-            None
+        // (Ctrl+C with a live selection) or any non-tmux app — e.g. a
+        // browser text-copy from the X/Twitter composer — the bytes go
+        // straight to the live clipboard and the daemon is never told.
+        // Result: every paste delivers the OLD `staged_text` even though
+        // the live clipboard holds bytes the user just copied.
+        //
+        // Probe Wayland FIRST, then fall back to X11 — same policy the
+        // staged-image branch above uses. On Mutter a native-Wayland
+        // app's Ctrl+C lands authoritatively on the Wayland clipboard,
+        // while the X11 mirror stays sticky on whatever last claimed it
+        // (here: the xclip owner clipboard-set.sh installed for the
+        // highlighted terminal selection). An X11-only probe reads that
+        // stale mirror, sees `bytes == existing`, skips the override, and
+        // pastes the previously-highlighted text instead of the fresh
+        // copy — the exact symptom this branch is meant to prevent.
+        let live_text = match read_wayland_text_if_present().await {
+            Some(b) => Some(b),
+            None if should_probe_external_text(state) => read_clipboard_text_if_present().await,
+            None => None,
         };
-        if let Some(bytes) = external_text {
+        if let Some(bytes) = live_text {
             if bytes.as_slice() != existing.bytes.as_slice() {
                 let s = StagedText {
                     bytes: Arc::new(bytes),
@@ -394,7 +412,7 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
                     pane,
                     live_bytes = s.bytes.len(),
                     staged_bytes = existing.bytes.len(),
-                    "paste: live X11 text differs from staged_text — using live X11 (kitty Ctrl+C or external app updated the clipboard)"
+                    "paste: live clipboard text differs from staged_text — using live (kitty Ctrl+C, browser copy, or external app updated the clipboard)"
                 );
                 state.set_staged_text(s.clone()).await;
                 staged = Some(StagedSelection::Text(s));
@@ -404,7 +422,7 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
 
     match staged {
         Some(StagedSelection::Text(text)) => {
-            if !claim_paste_slot(state) {
+            if !claim_paste_slot(state, paste_signature(pane, &text.bytes)) {
                 return deduped_response(pane, started);
             }
             let bytes = text.bytes.len();
@@ -421,7 +439,7 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
             })
         }
         Some(StagedSelection::Image(img)) if img.is_fresh() => {
-            if !claim_paste_slot(state) {
+            if !claim_paste_slot(state, paste_signature(pane, &img.bytes)) {
                 return deduped_response(pane, started);
             }
             if let Err(e) = paste::dispatch_image_paste(state.clone(), pane.to_string(), img).await
@@ -458,21 +476,31 @@ fn deduped_response(pane: &str, started: Instant) -> Value {
     })
 }
 
-fn claim_paste_slot(state: &SharedState) -> bool {
+/// Stable hash of `(pane, content)` — the dedup key. Two triggers for the
+/// same paste carry identical pane + bytes, so they collide here; a
+/// different pane or different bytes does not.
+fn paste_signature(pane: &str, content: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    pane.hash(&mut h);
+    content.hash(&mut h);
+    h.finish()
+}
+
+/// Claim the dispatch slot for `(pane, content)`. Returns `false` (deduped)
+/// when an identical signature was accepted inside `PASTE_DEDUP_WINDOW_MS`.
+/// The whole read-compare-store runs under the mutex so two simultaneous
+/// identical triggers can't both claim.
+fn claim_paste_slot(state: &SharedState, sig: u64) -> bool {
     let now = now_unix_ms();
-    loop {
-        let last = state.last_paste_ms.load(Ordering::Relaxed);
-        if is_duplicate_paste(now, last, PASTE_DEDUP_WINDOW_MS) {
+    let mut last = state.last_paste.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((last_ms, last_sig)) = *last {
+        if last_sig == sig && is_duplicate_paste(now, last_ms, PASTE_DEDUP_WINDOW_MS) {
             return false;
         }
-        if state
-            .last_paste_ms
-            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
-            .is_ok()
-        {
-            return true;
-        }
     }
+    *last = Some((now, sig));
+    true
 }
 
 fn is_duplicate_paste(now_ms: u64, last_ms: u64, window_ms: u64) -> bool {
@@ -522,6 +550,18 @@ async fn handle_stage_text(state: &Arc<SharedState>, bytes_b64: &str) -> Value {
         }
     };
     let n = bytes.len();
+    if bytes.is_empty() {
+        // Never stage a zero-byte text selection. An empty selection carries no
+        // clipboard payload; staging it would make the daemon's selection owners
+        // advertise empty text/plain + UTF8_STRING targets, so the next paste
+        // into any app delivers a zero-byte string. Every other text-staging
+        // path already guards empty (read_clipboard_text_if_present,
+        // read_wayland_text_if_present); this decoupled ingress now does too.
+        // (`flashpaste-trigger --stage-text` short-circuits empty stdin before
+        // it ever reaches us, so this guards any other caller of the op.)
+        debug!("stage_text rejected: empty selection");
+        return json!({ "ok": false, "reason": "empty-text", "bytes": 0 });
+    }
     let staged = StagedText {
         bytes: Arc::new(bytes),
         captured_at: std::time::SystemTime::now(),
@@ -584,6 +624,15 @@ pub(crate) async fn read_clipboard_text_if_present() -> Option<Vec<u8>> {
     if !read_out.status.success() || read_out.stdout.is_empty() {
         return None;
     }
+    // Mutter's wedged bridge can return PNG/binary bytes on a text target.
+    // Never stage an image as text — that's the raw-bytes-in-the-prompt bug.
+    if !looks_like_text(&read_out.stdout) {
+        warn!(
+            bytes = read_out.stdout.len(),
+            "paste: clipboard 'text' target returned non-text bytes (image leak) — ignoring"
+        );
+        return None;
+    }
     Some(read_out.stdout)
 }
 
@@ -592,6 +641,12 @@ pub(crate) async fn read_clipboard_text_if_present() -> Option<Vec<u8>> {
 /// the X11 fallback: on Mutter, X11 can lag behind a fresh screenshot claim,
 /// while Wayland is the authoritative signal that a browser text copy really
 /// happened after the screenshot.
+///
+/// We request a specific plain-text MIME rather than `MimeType::Text` so
+/// that wl_clipboard_rs cannot silently fall through to `text/html`. Sites
+/// like Facebook offer both `text/plain` and `text/html` on their clipboard;
+/// `MimeType::Text` may select the HTML variant, which contains raw
+/// `<img src="blob:..."/>` markup that ends up verbatim in the chat prompt.
 async fn read_wayland_text_if_present() -> Option<Vec<u8>> {
     let task = tokio::task::spawn_blocking(|| {
         use wl_clipboard_rs::paste::{get_contents, get_mime_types, ClipboardType, MimeType, Seat};
@@ -600,15 +655,29 @@ async fn read_wayland_text_if_present() -> Option<Vec<u8>> {
         if types.iter().any(|t| t.starts_with("image/")) {
             return None;
         }
-        if !types.iter().any(|t| is_text_target(t)) {
-            return None;
-        }
+
+        // Explicit preference order — plain text only, never text/html.
+        // `MimeType::Text` would let the library pick freely and can select
+        // text/html when a browser offers multiple text targets.
+        const PREFER: &[&str] = &[
+            "UTF8_STRING",
+            "text/plain;charset=utf-8",
+            "text/plain",
+            "TEXT",
+            "STRING",
+        ];
+        let mime = PREFER
+            .iter()
+            .find(|&&want| types.iter().any(|t| t == want))?;
 
         let (mut pipe, _mime) =
-            get_contents(ClipboardType::Regular, Seat::Unspecified, MimeType::Text).ok()?;
+            get_contents(ClipboardType::Regular, Seat::Unspecified, MimeType::Specific(mime))
+                .ok()?;
         let mut bytes = Vec::new();
         pipe.read_to_end(&mut bytes).ok()?;
-        if bytes.is_empty() {
+        // Same guard as the X11 reader: reject image bytes leaking onto a
+        // Wayland text target so they're never staged + pasted as text.
+        if bytes.is_empty() || !looks_like_text(&bytes) {
             None
         } else {
             Some(bytes)
@@ -624,6 +693,38 @@ async fn read_wayland_text_if_present() -> Option<Vec<u8>> {
 
 fn is_text_target(target: &str) -> bool {
     matches!(target, "UTF8_STRING" | "STRING" | "TEXT") || target.starts_with("text/plain")
+}
+
+/// Reject clipboard bytes that are clearly NOT text before they get staged and
+/// pasted as text.
+///
+/// On this GNOME-46/Mutter box the wedged X11<->Wayland bridge will hand back
+/// raw image bytes on a *text* target after a screenshot (xclip's silent
+/// fallback). Without this guard those bytes were staged as `StagedText` and
+/// dumped verbatim into the prompt — a multi-KB wall of `\x89PNG…IEND` garbage.
+/// Real clipboard text is valid UTF-8 with no NUL bytes; every image payload
+/// fails one of those on its leading bytes, so this is both precise and cheap.
+fn looks_like_text(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    // Fast path: known image magic numbers seen leaking onto text targets here.
+    const IMAGE_MAGIC: &[&[u8]] = &[
+        b"\x89PNG\r\n\x1a\n", // PNG
+        b"\xff\xd8\xff",      // JPEG
+        b"GIF87a",
+        b"GIF89a",
+        b"RIFF", // WebP / other RIFF container
+    ];
+    if IMAGE_MAGIC.iter().any(|m| bytes.starts_with(m)) {
+        return false;
+    }
+    // Text never carries a NUL; binary almost always does in its first bytes.
+    if bytes.contains(&0) {
+        return false;
+    }
+    // Final gate: a real text selection decodes as UTF-8.
+    std::str::from_utf8(bytes).is_ok()
 }
 
 /// Read raw image bytes off the live clipboard if (and only if) image MIME
@@ -687,9 +788,10 @@ pub(crate) async fn read_clipboard_image_if_present() -> Option<(Vec<u8>, &'stat
     }
 
     // Pick the best MIME advertised on either side.
-    let mime: &'static str = if let Some(m) = PREFERRED.iter().find(|want| {
-        wl_types.iter().any(|t| t == *want) || x_types.iter().any(|t| t == *want)
-    }) {
+    let mime: &'static str = if let Some(m) = PREFERRED
+        .iter()
+        .find(|want| wl_types.iter().any(|t| t == *want) || x_types.iter().any(|t| t == *want))
+    {
         match *m {
             "image/png" => "image/png",
             "image/jpeg" => "image/jpeg",
@@ -760,9 +862,7 @@ fn image_magic_ok(bytes: &[u8], mime: &str) -> bool {
     match mime {
         "image/png" => bytes.starts_with(b"\x89PNG\r\n\x1a\n"),
         "image/jpeg" => bytes.starts_with(b"\xff\xd8\xff"),
-        "image/webp" => {
-            bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP"
-        }
+        "image/webp" => bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP",
         _ => false,
     }
 }
@@ -901,6 +1001,25 @@ mod tests {
     }
 
     #[test]
+    fn looks_like_text_accepts_real_text() {
+        assert!(looks_like_text(b"hello world"));
+        assert!(looks_like_text("https://lifted.sk/hu/products/gym".as_bytes()));
+        assert!(looks_like_text("ÁÉÍ Slovak ďáčik · €4.40".as_bytes()));
+    }
+
+    #[test]
+    fn looks_like_text_rejects_image_and_binary() {
+        // The exact regression: a PNG served on a "text" target.
+        assert!(!looks_like_text(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"));
+        assert!(!looks_like_text(b"\xff\xd8\xff\xe0JFIF")); // JPEG
+        assert!(!looks_like_text(b"GIF89a\x01\x00")); // GIF
+        assert!(!looks_like_text(b"RIFF\x00\x00WEBP")); // WebP
+        assert!(!looks_like_text(b"text with a \x00 nul")); // NUL byte
+        assert!(!looks_like_text(&[0xff, 0xfe, 0xfd])); // invalid UTF-8
+        assert!(!looks_like_text(b"")); // empty is not pasteable text
+    }
+
+    #[test]
     fn ignores_whitespace_and_padding() {
         assert_eq!(decode_base64("aGVs\nbG8=").unwrap(), b"hello");
         assert_eq!(decode_base64("aGVsbG8 ").unwrap(), b"hello");
@@ -908,9 +1027,25 @@ mod tests {
 
     #[test]
     fn duplicate_paste_window_absorbs_only_recent_repeats() {
+        // last_ms == 0 means "never pasted" — not a duplicate.
         assert!(!is_duplicate_paste(1_000, 0, PASTE_DEDUP_WINDOW_MS));
-        assert!(is_duplicate_paste(1_100, 1_000, PASTE_DEDUP_WINDOW_MS));
-        assert!(!is_duplicate_paste(1_400, 1_000, PASTE_DEDUP_WINDOW_MS));
+        // A repeat inside the window (covers the measured 483–886 ms
+        // dual-handler spread) is absorbed.
+        assert!(is_duplicate_paste(1_900, 1_000, PASTE_DEDUP_WINDOW_MS));
+        // A repeat at exactly the window edge or beyond is a fresh paste.
+        assert!(!is_duplicate_paste(2_000, 1_000, PASTE_DEDUP_WINDOW_MS));
+        assert!(!is_duplicate_paste(2_400, 1_000, PASTE_DEDUP_WINDOW_MS));
+    }
+
+    #[test]
+    fn paste_signature_distinguishes_pane_and_content() {
+        let a = paste_signature("%4", b"hello");
+        // Same pane + same bytes => same signature (the dual-handler case).
+        assert_eq!(a, paste_signature("%4", b"hello"));
+        // Different pane => different signature (don't dedup across panes).
+        assert_ne!(a, paste_signature("%5", b"hello"));
+        // Different bytes => different signature (don't dedup distinct text).
+        assert_ne!(a, paste_signature("%4", b"world"));
     }
 
     #[test]

@@ -33,6 +33,18 @@ _size=$(wc -c <"$_tmp" 2>/dev/null || echo 0)
 _preview="$(head -c 100 "$_tmp" 2>/dev/null | tr '\n\r\t' '   ')"
 clog "clipboard-set" "event=invoked" "bytes=$_size" "preview='$_preview'" "WAYLAND_DISPLAY='${WAYLAND_DISPLAY:-}'" "DISPLAY='${DISPLAY:-}'"
 
+# An empty selection is not a copy — there is nothing to put on the clipboard.
+# tmux fires @clip on empty drags and on copy-mode actions where nothing is
+# highlighted (~5% of events on a busy session). If we forward those zero bytes
+# to ANY backend (wl-copy / xclip / xsel / the daemon's stage-text), that backend
+# becomes the owner of a zero-byte text selection — so the very next paste into
+# any app delivers an empty string (the "Couldn't send" / zero-byte-paste bug).
+# Skip empties entirely and leave whatever the user actually had on the clipboard.
+if [ ! -s "$_tmp" ]; then
+  clog "clipboard-set" "event=skip-empty" "reason=zero-byte-selection" "rc=0"
+  exit 0
+fi
+
 ensure_env() {
   [ -n "${WAYLAND_DISPLAY:-}${DISPLAY:-}" ] && return
   for pid in $(pgrep -u "$(id -u)" -x kitty 2>/dev/null); do

@@ -278,9 +278,19 @@ fn serve_target(
         // on whether we're serving an image or text selection.
         let mut supported = vec![atoms.targets, atoms.timestamp];
         match staged {
-            StagedSelection::Image(_) => {
+            StagedSelection::Image(img) => {
+                // Advertise the image's ACTUAL format, plus image/png as a
+                // universal alias (Claude Code reads `wl-paste -t image/png`).
+                // Never advertise a format the bytes are NOT: a PNG screenshot
+                // used to be advertised as image/jpeg too, so a browser that
+                // picked image/jpeg got PNG bytes mislabeled as JPEG — the
+                // upload failed and the chat sent a doomed empty message next to
+                // the image ("Couldn't send"). Mirrors the Wayland owner policy
+                // in wayland.rs (img.mime first, image/png alias).
+                if img.mime == "image/jpeg" {
+                    supported.push(atoms.image_jpeg);
+                }
                 supported.push(atoms.image_png);
-                supported.push(atoms.image_jpeg);
             }
             StagedSelection::Text(_) => {
                 supported.push(atoms.utf8_string);
@@ -314,7 +324,12 @@ fn serve_target(
         return Ok(true);
     }
     if let StagedSelection::Image(img) = staged {
-        if target == atoms.image_png || target == atoms.image_jpeg {
+        // image/png is the universal alias we always serve (Claude reads it).
+        // image/jpeg is served ONLY when the staged bytes really are JPEG —
+        // never hand a requestor JPEG-labeled PNG bytes (see the TARGETS note).
+        let serve_png = target == atoms.image_png;
+        let serve_jpeg = target == atoms.image_jpeg && img.mime == "image/jpeg";
+        if serve_png || serve_jpeg {
             change_property_chunked(conn, requestor, property, target, &img.bytes)?;
             return Ok(true);
         }

@@ -152,11 +152,23 @@ pub struct SharedState {
     /// the Wayland + X11 owners to refresh their selection content.
     pub stage_notifier_tx: watch::Sender<u64>,
     pub stage_notifier_rx: watch::Receiver<u64>,
-    /// Duplicate-trigger guard. Holds the unix-epoch millisecond timestamp
-    /// of the last `paste` op the daemon accepted. A second trigger inside
-    /// the short daemon debounce window is acknowledged as deduped instead
-    /// of dispatching the same clipboard payload again.
-    pub last_paste_ms: AtomicU64,
+    /// Duplicate-trigger guard. Holds `(unix-epoch-ms, signature)` of the
+    /// last `paste` op the daemon accepted, where `signature` is a hash of
+    /// `(pane_id, content_bytes)`. A second trigger that carries the SAME
+    /// signature inside the debounce window is acknowledged as deduped
+    /// instead of dispatching the same payload to the same pane again.
+    ///
+    /// Why pane+content rather than time-only: on this box a single Ctrl+V
+    /// fires TWO independent handlers — kitty's `map ctrl+v` (slow: spawns
+    /// `sh` + `tmux display-message`) and tmux's `bind -n C-v` (fast). They
+    /// land hundreds of ms apart, so a narrow time-only window let the pair
+    /// through as two pastes ("textext"). Keying on pane+content lets the
+    /// window widen enough to swallow that spread WITHOUT ever blocking a
+    /// genuinely different paste (different pane, or different bytes).
+    /// `std::sync::Mutex` keeps the read-compare-store atomic so two truly
+    /// simultaneous identical triggers can't both claim; the critical
+    /// section is a couple of integer compares and we never await holding it.
+    pub last_paste: std::sync::Mutex<Option<(u64, u64)>>,
     /// True while a paste dispatch is in flight. Subsequent paste requests
     /// during that window dedupe immediately (they're absorbed and replayed
     /// once at completion) instead of stacking — without this guard, a
@@ -219,7 +231,7 @@ impl SharedState {
             latest_selection: RwLock::new(None),
             stage_notifier_tx: tx,
             stage_notifier_rx: rx,
-            last_paste_ms: AtomicU64::new(0),
+            last_paste: std::sync::Mutex::new(None),
             paste_in_flight: AtomicBool::new(false),
             pending_paste: AtomicU8::new(0),
             pending_pane: std::sync::Mutex::new(None),
