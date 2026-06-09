@@ -704,7 +704,7 @@ fn is_text_target(target: &str) -> bool {
 /// dumped verbatim into the prompt — a multi-KB wall of `\x89PNG…IEND` garbage.
 /// Real clipboard text is valid UTF-8 with no NUL bytes; every image payload
 /// fails one of those on its leading bytes, so this is both precise and cheap.
-fn looks_like_text(bytes: &[u8]) -> bool {
+pub(crate) fn looks_like_text(bytes: &[u8]) -> bool {
     if bytes.is_empty() {
         return false;
     }
