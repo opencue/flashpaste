@@ -21,6 +21,8 @@ The four hard-won facts in [`AGENTS.md`](../../AGENTS.md) are essentially mini-A
 | [0003](0003-kitty-send-text-not-tmux-send-keys.md) | Use `kitty @ send-text` for image-paste, not `tmux send-keys` | Accepted | 2026-05-19 |
 | [0004](0004-wayland-authoritative-has-image-policy.md) | Wayland-authoritative `has_image` policy | Accepted | 2026-05-19 |
 | [0005](0005-tmux-unbind-rebind-not-pass-through.md) | Unbind + detached-rebind C-v around send-text, not pass-through | Accepted | 2026-05-19 |
+| [0006](0006-reduce-bash-surface-bounded-by-tier1-fallback.md) | Reduce the bash surface, bounded by the Tier-1 fallback guarantee | Proposed | 2026-06-10 |
+| [0007](0007-wayland-data-control-on-non-mutter.md) | Own the Wayland clipboard via data-control on non-Mutter compositors | Proposed | 2026-06-10 |
 
 ## Writing a new ADR
 
