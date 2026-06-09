@@ -332,6 +332,22 @@ for f in $(ls "$RDIR" | sort -n); do
   esac
 done
 
+# ── Behavioral regression suite (paste-correctness guards) ────────────
+# Runs the headless bash test suite (wl-paste image-coexistence guard,
+# kitty/tmux detector). A failure means a known paste bug could regress,
+# so it counts as a doctor failure.
+_selftest="$(dirname -- "$0")/flashpaste-selftest.sh"
+if [ -x "$_selftest" ]; then
+  echo
+  hdr "paste-correctness self-test"
+  if "$_selftest" >/dev/null 2>&1; then
+    ok "self-test" "behavioral paste-correctness suite passed"
+  else
+    fail "self-test" "behavioral paste-correctness suite FAILED — run $_selftest"
+    fails=$((fails + 1))
+  fi
+fi
+
 echo
 if [ "$fails" -eq 0 ] && [ "$warns" -eq 0 ]; then
   printf "${GREEN}All $core_checks core checks passed.${RESET} $optional_checks optional probe(s) also passed. flashpaste should work out of the box.\n"

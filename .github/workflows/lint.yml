@@ -66,6 +66,15 @@ jobs:
             -e SC1090,SC2034,SC2155 \
             "${shell_files[@]}"
 
+  behavior-tests:
+    name: paste-correctness behavioral tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run behavioral regression suite (headless, mocked clipboard)
+        run: bash bin/flashpaste-selftest.sh
+
   rust:
     name: rust fmt + clippy + unit tests
     runs-on: ubuntu-24.04
