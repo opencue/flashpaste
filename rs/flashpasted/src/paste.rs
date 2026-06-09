@@ -280,9 +280,9 @@ fn html_to_plaintext(text: &str) -> String {
         match name {
             "br" => out.push('\n'),
             // Block-level elements: ensure a newline boundary.
-            "p" | "/p" | "div" | "/div" | "section" | "/section" | "article"
-            | "/article" | "li" | "tr" | "/tr" | "h1" | "h2" | "h3" | "h4"
-            | "h5" | "h6" | "/h1" | "/h2" | "/h3" | "/h4" | "/h5" | "/h6" => {
+            "p" | "/p" | "div" | "/div" | "section" | "/section" | "article" | "/article"
+            | "li" | "tr" | "/tr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "/h1" | "/h2"
+            | "/h3" | "/h4" | "/h5" | "/h6" => {
                 if !out.ends_with('\n') && !out.is_empty() {
                     out.push('\n');
                 }
@@ -366,7 +366,7 @@ fn extract_blob_domain(tag: &str) -> Option<String> {
         .or_else(|| after_blob.strip_prefix("http://"))
         .unwrap_or(after_blob);
     let end = after_scheme
-        .find(|c: char| c == '/' || c == '"' || c == '\'' || c == ' ')
+        .find(['/', '"', '\'', ' '])
         .unwrap_or(after_scheme.len());
     let domain = &after_scheme[..end];
     if domain.is_empty() {
@@ -452,10 +452,7 @@ mod tests {
     fn block_elements_add_newlines() {
         let input = b"<div>first</div><div>second</div>";
         let out = sanitize_clipboard_text(input);
-        assert_eq!(
-            std::str::from_utf8(out.as_ref()).unwrap(),
-            "first\nsecond"
-        );
+        assert_eq!(std::str::from_utf8(out.as_ref()).unwrap(), "first\nsecond");
     }
 
     #[test]

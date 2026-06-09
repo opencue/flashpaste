@@ -188,6 +188,72 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
     // staged, read it now and stage it. The dir scan is ~1ms on a
     // typical screenshots folder; the file read is ~5-20ms for a 500KB
     // PNG. Cost is acceptable; correctness is critical.
+    eager_screenshot_pickup(state, pane).await;
+    eager_live_image_pickup(state, pane).await;
+
+    // ─── Intent: text or image (most-recent staged wins) ──────────────
+    // The staged-selection slot is single-valued (set_staged_image
+    // replaces text and vice versa), so whatever's in the slot is the
+    // most-recent staged action. If the slot is empty / stale, fall back
+    // to scraping the live X11 clipboard for fresh text. Otherwise punt
+    // to bash. Dispatch itself still has a short duplicate-trigger guard
+    // so one physical paste gesture cannot insert the same payload twice.
+    let staged = resolve_paste_intent(state, pane).await;
+
+    match staged {
+        Some(StagedSelection::Text(text)) => {
+            if !claim_paste_slot(state, paste_signature(pane, &text.bytes)) {
+                return deduped_response(pane, started);
+            }
+            let bytes = text.bytes.len();
+            if let Err(e) = paste::dispatch_text_paste(state.clone(), pane.to_string(), text).await
+            {
+                error!(error = ?e, pane, "text paste dispatch failed");
+                return json!({ "ok": false, "reason": "dispatch-failed", "fallback": "bash" });
+            }
+            json!({
+                "ok": true,
+                "kind": "text",
+                "bytes": bytes as u64,
+                "latency_ms": started.elapsed().as_millis() as u64,
+            })
+        }
+        Some(StagedSelection::Image(img)) if img.is_fresh() => {
+            if !claim_paste_slot(state, paste_signature(pane, &img.bytes)) {
+                return deduped_response(pane, started);
+            }
+            if let Err(e) = paste::dispatch_image_paste(state.clone(), pane.to_string(), img).await
+            {
+                error!(error = ?e, pane, "image paste dispatch failed");
+                return json!({ "ok": false, "reason": "dispatch-failed", "fallback": "bash" });
+            }
+            json!({
+                "ok": true,
+                "kind": "image",
+                "latency_ms": started.elapsed().as_millis() as u64,
+            })
+        }
+        Some(StagedSelection::Image(_)) => {
+            warn!(pane, "paste: staged image too old; punting to bash");
+            json!({ "ok": false, "reason": "stale-image", "fallback": "bash" })
+        }
+        None => {
+            info!(
+                pane,
+                "paste: nothing staged and clipboard has no text; punting to bash"
+            );
+            json!({ "ok": false, "reason": "no-content", "fallback": "bash" })
+        }
+    }
+}
+
+/// Eager fresh-screenshot pickup. GNOME's screenshot tool keeps the PNG fd
+/// open for ~3-5s while rendering its "saved" toast, so inotify's CLOSE_WRITE
+/// lags; a paste right after PrtScr would otherwise dispatch the stale staged
+/// selection. On every paste we stat the screenshots dir for the freshest
+/// image and, if it's newer than what's staged (and no fresh Wayland text
+/// overrides it), stage it now. Extracted verbatim from handle_paste.
+async fn eager_screenshot_pickup(state: &Arc<SharedState>, pane: &str) {
     if should_scan_screenshots(state) {
         if let Some((fresh_path, fresh_mtime)) = state
             .config
@@ -235,7 +301,14 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
             }
         }
     }
+}
 
+/// Eager live-clipboard image pickup. Bridges "browser Copy Image"
+/// (Firefox/Chrome write image bytes with no screenshot file), which the
+/// inotify watcher and dir scan both miss. Probe the live clipboard; if it
+/// advertises an image whose bytes differ from what's staged, stage it now.
+/// Extracted verbatim from handle_paste.
+async fn eager_live_image_pickup(state: &Arc<SharedState>, pane: &str) {
     // ─── Eager live-clipboard image pickup ────────────────────────────
     // Bridges "browser Copy Image" — Firefox/Chrome under Wayland write
     // image bytes to the clipboard with no file under
@@ -288,14 +361,15 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
             }
         }
     }
+}
 
-    // ─── Intent: text or image (most-recent staged wins) ──────────────
-    // The staged-selection slot is single-valued (set_staged_image
-    // replaces text and vice versa), so whatever's in the slot is the
-    // most-recent staged action. If the slot is empty / stale, fall back
-    // to scraping the live X11 clipboard for fresh text. Otherwise punt
-    // to bash. Dispatch itself still has a short duplicate-trigger guard
-    // so one physical paste gesture cannot insert the same payload twice.
+/// Resolve the paste intent: which selection (text or image) to dispatch.
+/// Starts from the staged slot, then applies the live-clipboard override
+/// cascade — scrape X11 text when nothing fresh is staged; let Wayland/X11
+/// text override a staged image once it's old enough; let live text override
+/// stale staged text. Returns the selection to dispatch. Extracted verbatim
+/// from handle_paste so the hot path reads as three named phases.
+async fn resolve_paste_intent(state: &Arc<SharedState>, pane: &str) -> Option<StagedSelection> {
     let mut staged = state.staged_snapshot().await;
     if !matches!(&staged, Some(s) if s.is_fresh()) {
         let external_text = if should_probe_external_text(state) {
@@ -420,51 +494,7 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
         }
     }
 
-    match staged {
-        Some(StagedSelection::Text(text)) => {
-            if !claim_paste_slot(state, paste_signature(pane, &text.bytes)) {
-                return deduped_response(pane, started);
-            }
-            let bytes = text.bytes.len();
-            if let Err(e) = paste::dispatch_text_paste(state.clone(), pane.to_string(), text).await
-            {
-                error!(error = ?e, pane, "text paste dispatch failed");
-                return json!({ "ok": false, "reason": "dispatch-failed", "fallback": "bash" });
-            }
-            json!({
-                "ok": true,
-                "kind": "text",
-                "bytes": bytes as u64,
-                "latency_ms": started.elapsed().as_millis() as u64,
-            })
-        }
-        Some(StagedSelection::Image(img)) if img.is_fresh() => {
-            if !claim_paste_slot(state, paste_signature(pane, &img.bytes)) {
-                return deduped_response(pane, started);
-            }
-            if let Err(e) = paste::dispatch_image_paste(state.clone(), pane.to_string(), img).await
-            {
-                error!(error = ?e, pane, "image paste dispatch failed");
-                return json!({ "ok": false, "reason": "dispatch-failed", "fallback": "bash" });
-            }
-            json!({
-                "ok": true,
-                "kind": "image",
-                "latency_ms": started.elapsed().as_millis() as u64,
-            })
-        }
-        Some(StagedSelection::Image(_)) => {
-            warn!(pane, "paste: staged image too old; punting to bash");
-            json!({ "ok": false, "reason": "stale-image", "fallback": "bash" })
-        }
-        None => {
-            info!(
-                pane,
-                "paste: nothing staged and clipboard has no text; punting to bash"
-            );
-            json!({ "ok": false, "reason": "no-content", "fallback": "bash" })
-        }
-    }
+    staged
 }
 
 fn deduped_response(pane: &str, started: Instant) -> Value {
@@ -670,9 +700,12 @@ async fn read_wayland_text_if_present() -> Option<Vec<u8>> {
             .iter()
             .find(|&&want| types.iter().any(|t| t == want))?;
 
-        let (mut pipe, _mime) =
-            get_contents(ClipboardType::Regular, Seat::Unspecified, MimeType::Specific(mime))
-                .ok()?;
+        let (mut pipe, _mime) = get_contents(
+            ClipboardType::Regular,
+            Seat::Unspecified,
+            MimeType::Specific(mime),
+        )
+        .ok()?;
         let mut bytes = Vec::new();
         pipe.read_to_end(&mut bytes).ok()?;
         // Same guard as the X11 reader: reject image bytes leaking onto a
@@ -691,6 +724,9 @@ async fn read_wayland_text_if_present() -> Option<Vec<u8>> {
         .flatten()
 }
 
+// Only referenced by the unit test below; gated so a release-clippy build
+// (which doesn't compile tests) doesn't flag it as dead code.
+#[cfg(test)]
 fn is_text_target(target: &str) -> bool {
     matches!(target, "UTF8_STRING" | "STRING" | "TEXT") || target.starts_with("text/plain")
 }
@@ -1003,7 +1039,9 @@ mod tests {
     #[test]
     fn looks_like_text_accepts_real_text() {
         assert!(looks_like_text(b"hello world"));
-        assert!(looks_like_text("https://lifted.sk/hu/products/gym".as_bytes()));
+        assert!(looks_like_text(
+            "https://lifted.sk/hu/products/gym".as_bytes()
+        ));
         assert!(looks_like_text("ÁÉÍ Slovak ďáčik · €4.40".as_bytes()));
     }
 
