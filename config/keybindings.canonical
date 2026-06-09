@@ -1,0 +1,18 @@
+# flashpaste — canonical keybinding source of truth
+#
+# The double-paste bug was config DRIFT: kitty.conf and tmux.conf each bound
+# Ctrl+V independently and got out of sync. This file is the single place that
+# declares what each side MUST bind. bin/flashpaste-keybindings-check.sh reads
+# it and verifies the live configs match, flagging drift (run by doctor).
+#
+# Format: one rule per non-comment line:  <surface> <key> <must-contain-substring>
+# The check passes when the live config's binding for <key> contains the
+# substring. Keep substrings stable (script basenames), not full command lines.
+
+# kitty's Ctrl+V must route through the tmux-aware router (suppresses kitty's
+# handler inside tmux so only tmux's bind fires — see kitty-paste-router.sh).
+kitty  ctrl+v  kitty-paste-router.sh
+
+# tmux's root Ctrl+V must hit the fast Rust trigger (daemon), falling back to
+# the bash dispatcher when the daemon is down.
+tmux   C-v     flashpaste-trigger

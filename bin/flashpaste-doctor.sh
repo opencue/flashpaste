@@ -348,6 +348,21 @@ if [ -x "$_selftest" ]; then
   fi
 fi
 
+# ── Keybinding drift check (kitty.conf vs tmux.conf vs canonical) ──────
+# The double-paste bug was Ctrl+V drifting between the two configs. Warn
+# (not fail) on drift: it degrades to the daemon's dedup, not a breakage.
+_kbcheck="$(dirname -- "$0")/flashpaste-keybindings-check.sh"
+if [ -x "$_kbcheck" ]; then
+  echo
+  hdr "keybinding drift"
+  if "$_kbcheck" >/dev/null 2>&1; then
+    ok "keybindings" "kitty + tmux Ctrl+V consistent with canonical source"
+  else
+    warn "keybindings" "Ctrl+V drift between kitty/tmux/canonical — run $_kbcheck"
+    warns=$((warns + 1))
+  fi
+fi
+
 echo
 if [ "$fails" -eq 0 ] && [ "$warns" -eq 0 ]; then
   printf "${GREEN}All $core_checks core checks passed.${RESET} $optional_checks optional probe(s) also passed. flashpaste should work out of the box.\n"
