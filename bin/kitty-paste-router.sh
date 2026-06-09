@@ -45,7 +45,10 @@ fi
 # Not in tmux (or undetectable) — run the original kitty paste path. The
 # daemon dedups if this turns out to be a duplicate of tmux's fire.
 pane="$(tmux display-message -p "#{pane_id}" 2>/dev/null)"
-if flashpaste-trigger "$pane" 2>/dev/null; then
+# Only call the daemon trigger when we actually have a pane id. An empty
+# pane (no tmux at all) can't be a paste target, so go straight to the
+# image fallback instead of handing the daemon a blank pane.
+if [ -n "$pane" ] && flashpaste-trigger "$pane" 2>/dev/null; then
   exit 0
 fi
 exec "$PASTE_IMAGE_FALLBACK"

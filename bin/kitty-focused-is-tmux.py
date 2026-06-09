@@ -34,10 +34,15 @@ def main():
     for os_window in data:
         for tab in os_window.get("tabs", []):
             for window in tab.get("windows", []):
-                # With --match state:focused kitty already filters to the
-                # focused window, but guard anyway for older kitty that
-                # ignores the match and returns everything.
-                if window.get("is_focused") is False:
+                # Only consider a window we can POSITIVELY confirm is focused.
+                # `--match state:focused` already filters to it (and sets
+                # is_focused=true), so requiring True here is exact on modern
+                # kitty. On older kitty that ignores the match and returns
+                # every window WITHOUT is_focused, no window qualifies -> we
+                # report "not tmux" -> the router falls through and the paste
+                # still happens. That is the fail-safe direction: never
+                # suppress a paste on a window we cannot prove is focused.
+                if window.get("is_focused") is not True:
                     continue
                 for proc in window.get("foreground_processes", []):
                     if _is_tmux_cmdline(proc.get("cmdline")):

@@ -26,6 +26,11 @@ check "empty input -> not tmux" "" 1
 check "garbage input -> not tmux" "not json" 1
 check "tmux only in a NON-focused window -> not tmux" \
   '[{"tabs":[{"windows":[{"is_focused":true,"foreground_processes":[{"cmdline":["nvim"]}]},{"is_focused":false,"foreground_processes":[{"cmdline":["tmux"]}]}]}]}]' 1
+# Old kitty that ignores --match and omits is_focused: no window is provably
+# focused, so even with tmux present we must report "not tmux" (fail-safe:
+# the router then lets the paste happen rather than suppressing it).
+check "is_focused absent + tmux present -> not tmux (fail-safe)" \
+  '[{"tabs":[{"windows":[{"foreground_processes":[{"cmdline":["/usr/bin/tmux","attach"]}]}]}]}]' 1
 
 echo "--- kitty-focused-is-tmux: PASS=$pass FAIL=$fail"
 [ "$fail" = "0" ]
