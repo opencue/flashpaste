@@ -23,8 +23,8 @@ while read -r surface key want; do
   # Escape ERE metacharacters in the key (e.g. the '+' in ctrl+v).
   key_re=$(printf '%s' "$key" | sed 's/[][\\.^$*+?(){}|]/\\&/g')
   case "$surface" in
-    kitty) conf="$KITTY_CONF"; line=$(grep -E "^[[:space:]]*map[[:space:]]+$key_re[[:space:]]" "$conf" 2>/dev/null | tail -1) ;;
-    tmux)  conf="$TMUX_CONF";  line=$(grep -E "^[[:space:]]*bind[[:space:]]+-n[[:space:]]+$key_re[[:space:]]" "$conf" 2>/dev/null | tail -1) ;;
+    kitty) conf="$KITTY_CONF"; line=$(grep -E "^[[:space:]]*map[[:space:]]+${key_re}[[:space:]]" "$conf" 2>/dev/null | tail -1) ;;
+    tmux)  conf="$TMUX_CONF";  line=$(grep -E "^[[:space:]]*bind[[:space:]]+-n[[:space:]]+${key_re}[[:space:]]" "$conf" 2>/dev/null | tail -1) ;;
     *) echo "  ? unknown surface '$surface' in canonical"; drift=1; continue ;;
   esac
   if [ "$want" = "UNBOUND" ]; then
