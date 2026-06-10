@@ -25,7 +25,35 @@
 set -u
 
 PASTE_IMAGE_FALLBACK="${FLASHPASTE_IMAGE_FALLBACK:-/home/deadpool/paste_image.sh}"
-KITTY_SOCK="${KITTY_LISTEN_ON:-unix:/run/user/$(id -u)/kitty-main}"
+# Resolve kitty's remote-control socket.
+#
+# kitty appends "-<pid>" to the `listen_on` path, so `listen_on
+# unix:.../kitty-main` actually opens `.../kitty-main-<pid>`. Crucially,
+# KITTY_LISTEN_ON is NOT in the env this script inherits: kitty's `map
+# ctrl+v launch --copy-env` copies kitty's OWN process env, which does not
+# carry KITTY_LISTEN_ON (only child windows get it). So the old bare
+# `kitty-main` fallback never matched the real `kitty-main-<pid>` socket —
+# `kitten @ ls` failed every time, focused_window_is_tmux() always returned
+# false, and this router NEVER suppressed kitty's redundant fire. Net effect:
+# a single Ctrl+V pasted twice (tmux's bind immediately + this router ~1s
+# later). Resolve robustly: trust KITTY_LISTEN_ON when present, else glob the
+# real socket (newest wins if several kitty instances are running).
+resolve_kitty_sock() {
+  if [ -n "${KITTY_LISTEN_ON:-}" ]; then
+    printf '%s\n' "$KITTY_LISTEN_ON"
+    return 0
+  fi
+  local base s
+  base="/run/user/$(id -u)/kitty-main"
+  # Newest matching socket first; `kitty-main-<pid>` is what kitty creates.
+  for s in $(ls -1t "$base"-* "$base" 2>/dev/null); do
+    [ -S "$s" ] && { printf 'unix:%s\n' "$s"; return 0; }
+  done
+  # Last-ditch: hand back the bare path; kitten will fail and we fall through
+  # to the normal paste path (the daemon's dedup is the remaining safety net).
+  printf 'unix:%s\n' "$base"
+}
+KITTY_SOCK="$(resolve_kitty_sock)"
 
 # Confidently true (exit 0) ONLY when the focused kitty window's foreground
 # process is tmux. Any failure to determine that returns non-zero, so the

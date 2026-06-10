@@ -39,13 +39,16 @@ use crate::state::{now_unix_ms, SharedState, StagedImage, StagedSelection, Stage
 const MAX_REQUEST_BYTES: u32 = 8 * 1024 * 1024;
 /// How long a paste with an identical `(pane, content)` signature is
 /// suppressed after one is accepted. Sized to swallow the dual-handler
-/// spread (kitty's `map ctrl+v` and tmux's `bind -n C-v` both fire on one
-/// keypress and land ~450–900 ms apart on this box — measured organic
-/// double-pastes of 483 ms and 886 ms in the daemon journal). Because the
-/// guard now keys on pane+content (not time alone), this wider window never
-/// blocks a genuinely different paste — only a verbatim re-fire of the same
-/// bytes into the same pane within ~1 s, which is exactly the bug.
-const PASTE_DEDUP_WINDOW_MS: u64 = 1000;
+/// spread: kitty's `map ctrl+v` launches the paste router as a BACKGROUND
+/// process, so its redundant fire can land well after tmux's `bind -n C-v`
+/// already pasted — a real measurement on this box showed the two pastes
+/// **1.84 s apart** (12:16:31.417 then :33.253, identical 972-byte payload),
+/// which sailed past the old 1 s window and produced a visible double. The
+/// guard keys on pane+content (see `paste_signature`, which also trims
+/// trailing newlines), so this wider window never blocks a genuinely
+/// different paste — only a verbatim re-fire of the same bytes into the same
+/// pane within ~2.5 s, which is exactly the bug.
+const PASTE_DEDUP_WINDOW_MS: u64 = 2500;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -513,7 +516,20 @@ fn paste_signature(pane: &str, content: &[u8]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     pane.hash(&mut h);
-    content.hash(&mut h);
+    // Normalize trailing line endings before hashing. The dual-handler
+    // delivers the *same* text via two paths whose trailing-newline handling
+    // differs — one appends a `\n`, so the two fires render as "+N lines" and
+    // "+N+1 lines" and, without this trim, hash to DIFFERENT signatures and
+    // dodge the dedup. Trimming trailing `\n`/`\r` makes the near-identical
+    // second fire collide on the same signature so it is absorbed.
+    let trimmed = {
+        let mut end = content.len();
+        while end > 0 && matches!(content[end - 1], b'\n' | b'\r') {
+            end -= 1;
+        }
+        &content[..end]
+    };
+    trimmed.hash(&mut h);
     h.finish()
 }
 
@@ -1067,12 +1083,14 @@ mod tests {
     fn duplicate_paste_window_absorbs_only_recent_repeats() {
         // last_ms == 0 means "never pasted" — not a duplicate.
         assert!(!is_duplicate_paste(1_000, 0, PASTE_DEDUP_WINDOW_MS));
-        // A repeat inside the window (covers the measured 483–886 ms
-        // dual-handler spread) is absorbed.
+        // A repeat inside the window is absorbed — including the measured
+        // 1.84 s kitty-router-vs-tmux-bind spread that the old 1 s window let
+        // through.
         assert!(is_duplicate_paste(1_900, 1_000, PASTE_DEDUP_WINDOW_MS));
+        assert!(is_duplicate_paste(2_800, 1_000, PASTE_DEDUP_WINDOW_MS)); // 1.8s gap
         // A repeat at exactly the window edge or beyond is a fresh paste.
-        assert!(!is_duplicate_paste(2_000, 1_000, PASTE_DEDUP_WINDOW_MS));
-        assert!(!is_duplicate_paste(2_400, 1_000, PASTE_DEDUP_WINDOW_MS));
+        assert!(!is_duplicate_paste(3_500, 1_000, PASTE_DEDUP_WINDOW_MS));
+        assert!(!is_duplicate_paste(3_501, 1_000, PASTE_DEDUP_WINDOW_MS));
     }
 
     #[test]
@@ -1084,6 +1102,14 @@ mod tests {
         assert_ne!(a, paste_signature("%5", b"hello"));
         // Different bytes => different signature (don't dedup distinct text).
         assert_ne!(a, paste_signature("%4", b"world"));
+        // Trailing-newline variants collide: the dual-handler delivers the
+        // same text with/without a trailing \n ("+N" vs "+N+1 lines"); both
+        // must dedup to the same signature.
+        assert_eq!(a, paste_signature("%4", b"hello\n"));
+        assert_eq!(a, paste_signature("%4", b"hello\r\n"));
+        assert_eq!(a, paste_signature("%4", b"hello\n\n"));
+        // But an interior newline is real content, not trailing — keep distinct.
+        assert_ne!(a, paste_signature("%4", b"hel\nlo"));
     }
 
     #[test]
