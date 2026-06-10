@@ -1088,7 +1088,7 @@ mod tests {
         // through.
         assert!(is_duplicate_paste(1_900, 1_000, PASTE_DEDUP_WINDOW_MS));
         assert!(is_duplicate_paste(2_800, 1_000, PASTE_DEDUP_WINDOW_MS)); // 1.8s gap
-        // A repeat at exactly the window edge or beyond is a fresh paste.
+                                                                          // A repeat at exactly the window edge or beyond is a fresh paste.
         assert!(!is_duplicate_paste(3_500, 1_000, PASTE_DEDUP_WINDOW_MS));
         assert!(!is_duplicate_paste(3_501, 1_000, PASTE_DEDUP_WINDOW_MS));
     }
