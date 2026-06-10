@@ -6,6 +6,15 @@ Release-tag policy: every `vX.Y` commit on `main` must be tagged and have a matc
 
 ## [Unreleased]
 
+### Fixed
+
+- Double-paste under XWayland kitty, round two. The kitty `ctrl+v` interception is retired: under XWayland, `kitten @ ls` reports `is_focused=false` for every OS window and empty `foreground_processes`, so `kitty-paste-router.sh`'s tmux detection could never succeed. Every paste took the slow fallthrough (a background `launch` that lands seconds late under load), and the late second fire fell outside the daemon's 2.5 s dedup window — observed as identical 162-byte pastes 4 s apart. `config/keybindings.canonical` now requires kitty `ctrl+v` to be `UNBOUND` (new canonical keyword, enforced by `flashpaste-keybindings-check.sh`); tmux's `bind -n C-v` is the single Ctrl+V handler (~5 ms, pane id always from the pressing client). In non-tmux kitty windows the raw `0x16` reaches Claude Code, which reads the clipboard itself via the `wl-paste` shim; plain shells use kitty's native `ctrl+shift+v`.
+
+### Added
+
+- `flashpaste-keybindings-check.sh`: `UNBOUND` keyword in `keybindings.canonical` asserts a key must NOT be bound on a surface (previously only positive "must contain" rules existed).
+- `kitty-paste-router.sh` now traces to the shared clipboard-pipeline log (`paste-router` tag: invoked / suppressed / fallthrough / pane-resolved / done / image-fallback), closing the observability gap that made this regression invisible — the router was the only paste path that wrote no logs.
+
 ## [1.34] - 2026-05-21
 
 ### Fixed

@@ -27,6 +27,16 @@ while read -r surface key want; do
     tmux)  conf="$TMUX_CONF";  line=$(grep -E "^[[:space:]]*bind[[:space:]]+-n[[:space:]]+$key_re[[:space:]]" "$conf" 2>/dev/null | tail -1) ;;
     *) echo "  ? unknown surface '$surface' in canonical"; drift=1; continue ;;
   esac
+  if [ "$want" = "UNBOUND" ]; then
+    if [ -z "$line" ]; then
+      echo "  ✓ $surface $key -> unbound (as required)"
+    else
+      echo "  ✗ $surface $key: must be UNBOUND but a live binding exists"
+      echo "      live: $line"
+      drift=1
+    fi
+    continue
+  fi
   if [ -z "$line" ]; then
     echo "  ✗ $surface $key: no binding found in $conf"
     drift=1

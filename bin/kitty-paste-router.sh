@@ -22,7 +22,21 @@
 # this adds zero latency to the actual paste. When NOT in tmux, kitty's
 # handler is the only one and ~30ms there is unnoticeable.
 # ─────────────────────────────────────────────────────────────────────
+# STATUS (2026-06-10): RETIRED from the default keybindings. Under XWayland
+# kitty, `kitten @ ls` reports is_focused=false for every window and empty
+# foreground_processes, so focused_window_is_tmux() can never succeed; every
+# paste took the slow fallthrough (background launch, seconds under load) and
+# a late second fire landed outside the daemon's dedup window -> double paste.
+# config/keybindings.canonical now requires kitty ctrl+v to be UNBOUND; tmux's
+# own `bind -n C-v` is the single handler. This script remains for
+# native-Wayland setups that still map it explicitly.
 set -u
+
+# Trace to the shared clipboard-pipeline log (same stream as paste_image.sh /
+# tmux-paste-dispatch.sh) so a real Ctrl+V shows which branch fired here.
+. "$(dirname -- "$0")/clip-pipeline-log.sh" 2>/dev/null || true
+type clog >/dev/null 2>&1 || clog() { :; }
+clog "paste-router" "event=invoked" "KITTY_LISTEN_ON='${KITTY_LISTEN_ON:-}'" "KITTY_WINDOW_ID='${KITTY_WINDOW_ID:-}'"
 
 PASTE_IMAGE_FALLBACK="${FLASHPASTE_IMAGE_FALLBACK:-/home/deadpool/paste_image.sh}"
 # Resolve kitty's remote-control socket.
@@ -72,8 +86,10 @@ focused_window_is_tmux() {
 
 if focused_window_is_tmux; then
   # tmux's `bind -n C-v` owns this paste. Do nothing.
+  clog "paste-router" "event=suppressed" "reason=focused-window-is-tmux" "sock='$KITTY_SOCK'"
   exit 0
 fi
+clog "paste-router" "event=fallthrough" "reason=tmux-not-detected" "sock='$KITTY_SOCK'"
 
 # Not in tmux (or undetectable) — run the original kitty paste path. The
 # daemon dedups if this turns out to be a duplicate of tmux's fire.
@@ -81,7 +97,10 @@ pane="$(tmux display-message -p "#{pane_id}" 2>/dev/null)"
 # Only call the daemon trigger when we actually have a pane id. An empty
 # pane (no tmux at all) can't be a paste target, so go straight to the
 # image fallback instead of handing the daemon a blank pane.
+clog "paste-router" "event=pane-resolved" "pane='$pane'"
 if [ -n "$pane" ] && flashpaste-trigger "$pane" 2>/dev/null; then
+  clog "paste-router" "event=done" "via=flashpaste-trigger" "pane='$pane'"
   exit 0
 fi
+clog "paste-router" "event=image-fallback" "exec='$PASTE_IMAGE_FALLBACK'"
 exec "$PASTE_IMAGE_FALLBACK"
