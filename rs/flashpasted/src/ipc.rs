@@ -39,13 +39,16 @@ use crate::state::{now_unix_ms, SharedState, StagedImage, StagedSelection, Stage
 const MAX_REQUEST_BYTES: u32 = 8 * 1024 * 1024;
 /// How long a paste with an identical `(pane, content)` signature is
 /// suppressed after one is accepted. Sized to swallow the dual-handler
-/// spread (kitty's `map ctrl+v` and tmux's `bind -n C-v` both fire on one
-/// keypress and land ~450–900 ms apart on this box — measured organic
-/// double-pastes of 483 ms and 886 ms in the daemon journal). Because the
-/// guard now keys on pane+content (not time alone), this wider window never
-/// blocks a genuinely different paste — only a verbatim re-fire of the same
-/// bytes into the same pane within ~1 s, which is exactly the bug.
-const PASTE_DEDUP_WINDOW_MS: u64 = 1000;
+/// spread: kitty's `map ctrl+v` launches the paste router as a BACKGROUND
+/// process, so its redundant fire can land well after tmux's `bind -n C-v`
+/// already pasted — a real measurement on this box showed the two pastes
+/// **1.84 s apart** (12:16:31.417 then :33.253, identical 972-byte payload),
+/// which sailed past the old 1 s window and produced a visible double. The
+/// guard keys on pane+content (see `paste_signature`, which also trims
+/// trailing newlines), so this wider window never blocks a genuinely
+/// different paste — only a verbatim re-fire of the same bytes into the same
+/// pane within ~2.5 s, which is exactly the bug.
+const PASTE_DEDUP_WINDOW_MS: u64 = 2500;
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -188,6 +191,72 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
     // staged, read it now and stage it. The dir scan is ~1ms on a
     // typical screenshots folder; the file read is ~5-20ms for a 500KB
     // PNG. Cost is acceptable; correctness is critical.
+    eager_screenshot_pickup(state, pane).await;
+    eager_live_image_pickup(state, pane).await;
+
+    // ─── Intent: text or image (most-recent staged wins) ──────────────
+    // The staged-selection slot is single-valued (set_staged_image
+    // replaces text and vice versa), so whatever's in the slot is the
+    // most-recent staged action. If the slot is empty / stale, fall back
+    // to scraping the live X11 clipboard for fresh text. Otherwise punt
+    // to bash. Dispatch itself still has a short duplicate-trigger guard
+    // so one physical paste gesture cannot insert the same payload twice.
+    let staged = resolve_paste_intent(state, pane).await;
+
+    match staged {
+        Some(StagedSelection::Text(text)) => {
+            if !claim_paste_slot(state, paste_signature(pane, &text.bytes)) {
+                return deduped_response(pane, started);
+            }
+            let bytes = text.bytes.len();
+            if let Err(e) = paste::dispatch_text_paste(state.clone(), pane.to_string(), text).await
+            {
+                error!(error = ?e, pane, "text paste dispatch failed");
+                return json!({ "ok": false, "reason": "dispatch-failed", "fallback": "bash" });
+            }
+            json!({
+                "ok": true,
+                "kind": "text",
+                "bytes": bytes as u64,
+                "latency_ms": started.elapsed().as_millis() as u64,
+            })
+        }
+        Some(StagedSelection::Image(img)) if img.is_fresh() => {
+            if !claim_paste_slot(state, paste_signature(pane, &img.bytes)) {
+                return deduped_response(pane, started);
+            }
+            if let Err(e) = paste::dispatch_image_paste(state.clone(), pane.to_string(), img).await
+            {
+                error!(error = ?e, pane, "image paste dispatch failed");
+                return json!({ "ok": false, "reason": "dispatch-failed", "fallback": "bash" });
+            }
+            json!({
+                "ok": true,
+                "kind": "image",
+                "latency_ms": started.elapsed().as_millis() as u64,
+            })
+        }
+        Some(StagedSelection::Image(_)) => {
+            warn!(pane, "paste: staged image too old; punting to bash");
+            json!({ "ok": false, "reason": "stale-image", "fallback": "bash" })
+        }
+        None => {
+            info!(
+                pane,
+                "paste: nothing staged and clipboard has no text; punting to bash"
+            );
+            json!({ "ok": false, "reason": "no-content", "fallback": "bash" })
+        }
+    }
+}
+
+/// Eager fresh-screenshot pickup. GNOME's screenshot tool keeps the PNG fd
+/// open for ~3-5s while rendering its "saved" toast, so inotify's CLOSE_WRITE
+/// lags; a paste right after PrtScr would otherwise dispatch the stale staged
+/// selection. On every paste we stat the screenshots dir for the freshest
+/// image and, if it's newer than what's staged (and no fresh Wayland text
+/// overrides it), stage it now. Extracted verbatim from handle_paste.
+async fn eager_screenshot_pickup(state: &Arc<SharedState>, pane: &str) {
     if should_scan_screenshots(state) {
         if let Some((fresh_path, fresh_mtime)) = state
             .config
@@ -235,7 +304,14 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
             }
         }
     }
+}
 
+/// Eager live-clipboard image pickup. Bridges "browser Copy Image"
+/// (Firefox/Chrome write image bytes with no screenshot file), which the
+/// inotify watcher and dir scan both miss. Probe the live clipboard; if it
+/// advertises an image whose bytes differ from what's staged, stage it now.
+/// Extracted verbatim from handle_paste.
+async fn eager_live_image_pickup(state: &Arc<SharedState>, pane: &str) {
     // ─── Eager live-clipboard image pickup ────────────────────────────
     // Bridges "browser Copy Image" — Firefox/Chrome under Wayland write
     // image bytes to the clipboard with no file under
@@ -288,14 +364,15 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
             }
         }
     }
+}
 
-    // ─── Intent: text or image (most-recent staged wins) ──────────────
-    // The staged-selection slot is single-valued (set_staged_image
-    // replaces text and vice versa), so whatever's in the slot is the
-    // most-recent staged action. If the slot is empty / stale, fall back
-    // to scraping the live X11 clipboard for fresh text. Otherwise punt
-    // to bash. Dispatch itself still has a short duplicate-trigger guard
-    // so one physical paste gesture cannot insert the same payload twice.
+/// Resolve the paste intent: which selection (text or image) to dispatch.
+/// Starts from the staged slot, then applies the live-clipboard override
+/// cascade — scrape X11 text when nothing fresh is staged; let Wayland/X11
+/// text override a staged image once it's old enough; let live text override
+/// stale staged text. Returns the selection to dispatch. Extracted verbatim
+/// from handle_paste so the hot path reads as three named phases.
+async fn resolve_paste_intent(state: &Arc<SharedState>, pane: &str) -> Option<StagedSelection> {
     let mut staged = state.staged_snapshot().await;
     if !matches!(&staged, Some(s) if s.is_fresh()) {
         let external_text = if should_probe_external_text(state) {
@@ -420,51 +497,7 @@ async fn handle_paste(state: &Arc<SharedState>, pane: &str, started: Instant) ->
         }
     }
 
-    match staged {
-        Some(StagedSelection::Text(text)) => {
-            if !claim_paste_slot(state, paste_signature(pane, &text.bytes)) {
-                return deduped_response(pane, started);
-            }
-            let bytes = text.bytes.len();
-            if let Err(e) = paste::dispatch_text_paste(state.clone(), pane.to_string(), text).await
-            {
-                error!(error = ?e, pane, "text paste dispatch failed");
-                return json!({ "ok": false, "reason": "dispatch-failed", "fallback": "bash" });
-            }
-            json!({
-                "ok": true,
-                "kind": "text",
-                "bytes": bytes as u64,
-                "latency_ms": started.elapsed().as_millis() as u64,
-            })
-        }
-        Some(StagedSelection::Image(img)) if img.is_fresh() => {
-            if !claim_paste_slot(state, paste_signature(pane, &img.bytes)) {
-                return deduped_response(pane, started);
-            }
-            if let Err(e) = paste::dispatch_image_paste(state.clone(), pane.to_string(), img).await
-            {
-                error!(error = ?e, pane, "image paste dispatch failed");
-                return json!({ "ok": false, "reason": "dispatch-failed", "fallback": "bash" });
-            }
-            json!({
-                "ok": true,
-                "kind": "image",
-                "latency_ms": started.elapsed().as_millis() as u64,
-            })
-        }
-        Some(StagedSelection::Image(_)) => {
-            warn!(pane, "paste: staged image too old; punting to bash");
-            json!({ "ok": false, "reason": "stale-image", "fallback": "bash" })
-        }
-        None => {
-            info!(
-                pane,
-                "paste: nothing staged and clipboard has no text; punting to bash"
-            );
-            json!({ "ok": false, "reason": "no-content", "fallback": "bash" })
-        }
-    }
+    staged
 }
 
 fn deduped_response(pane: &str, started: Instant) -> Value {
@@ -483,7 +516,20 @@ fn paste_signature(pane: &str, content: &[u8]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     pane.hash(&mut h);
-    content.hash(&mut h);
+    // Normalize trailing line endings before hashing. The dual-handler
+    // delivers the *same* text via two paths whose trailing-newline handling
+    // differs — one appends a `\n`, so the two fires render as "+N lines" and
+    // "+N+1 lines" and, without this trim, hash to DIFFERENT signatures and
+    // dodge the dedup. Trimming trailing `\n`/`\r` makes the near-identical
+    // second fire collide on the same signature so it is absorbed.
+    let trimmed = {
+        let mut end = content.len();
+        while end > 0 && matches!(content[end - 1], b'\n' | b'\r') {
+            end -= 1;
+        }
+        &content[..end]
+    };
+    trimmed.hash(&mut h);
     h.finish()
 }
 
@@ -670,9 +716,12 @@ async fn read_wayland_text_if_present() -> Option<Vec<u8>> {
             .iter()
             .find(|&&want| types.iter().any(|t| t == want))?;
 
-        let (mut pipe, _mime) =
-            get_contents(ClipboardType::Regular, Seat::Unspecified, MimeType::Specific(mime))
-                .ok()?;
+        let (mut pipe, _mime) = get_contents(
+            ClipboardType::Regular,
+            Seat::Unspecified,
+            MimeType::Specific(mime),
+        )
+        .ok()?;
         let mut bytes = Vec::new();
         pipe.read_to_end(&mut bytes).ok()?;
         // Same guard as the X11 reader: reject image bytes leaking onto a
@@ -691,6 +740,9 @@ async fn read_wayland_text_if_present() -> Option<Vec<u8>> {
         .flatten()
 }
 
+// Only referenced by the unit test below; gated so a release-clippy build
+// (which doesn't compile tests) doesn't flag it as dead code.
+#[cfg(test)]
 fn is_text_target(target: &str) -> bool {
     matches!(target, "UTF8_STRING" | "STRING" | "TEXT") || target.starts_with("text/plain")
 }
@@ -704,7 +756,7 @@ fn is_text_target(target: &str) -> bool {
 /// dumped verbatim into the prompt — a multi-KB wall of `\x89PNG…IEND` garbage.
 /// Real clipboard text is valid UTF-8 with no NUL bytes; every image payload
 /// fails one of those on its leading bytes, so this is both precise and cheap.
-fn looks_like_text(bytes: &[u8]) -> bool {
+pub(crate) fn looks_like_text(bytes: &[u8]) -> bool {
     if bytes.is_empty() {
         return false;
     }
@@ -1003,7 +1055,9 @@ mod tests {
     #[test]
     fn looks_like_text_accepts_real_text() {
         assert!(looks_like_text(b"hello world"));
-        assert!(looks_like_text("https://lifted.sk/hu/products/gym".as_bytes()));
+        assert!(looks_like_text(
+            "https://lifted.sk/hu/products/gym".as_bytes()
+        ));
         assert!(looks_like_text("ÁÉÍ Slovak ďáčik · €4.40".as_bytes()));
     }
 
@@ -1029,12 +1083,14 @@ mod tests {
     fn duplicate_paste_window_absorbs_only_recent_repeats() {
         // last_ms == 0 means "never pasted" — not a duplicate.
         assert!(!is_duplicate_paste(1_000, 0, PASTE_DEDUP_WINDOW_MS));
-        // A repeat inside the window (covers the measured 483–886 ms
-        // dual-handler spread) is absorbed.
+        // A repeat inside the window is absorbed — including the measured
+        // 1.84 s kitty-router-vs-tmux-bind spread that the old 1 s window let
+        // through.
         assert!(is_duplicate_paste(1_900, 1_000, PASTE_DEDUP_WINDOW_MS));
+        assert!(is_duplicate_paste(2_800, 1_000, PASTE_DEDUP_WINDOW_MS)); // 1.8s gap
         // A repeat at exactly the window edge or beyond is a fresh paste.
-        assert!(!is_duplicate_paste(2_000, 1_000, PASTE_DEDUP_WINDOW_MS));
-        assert!(!is_duplicate_paste(2_400, 1_000, PASTE_DEDUP_WINDOW_MS));
+        assert!(!is_duplicate_paste(3_500, 1_000, PASTE_DEDUP_WINDOW_MS));
+        assert!(!is_duplicate_paste(3_501, 1_000, PASTE_DEDUP_WINDOW_MS));
     }
 
     #[test]
@@ -1046,6 +1102,14 @@ mod tests {
         assert_ne!(a, paste_signature("%5", b"hello"));
         // Different bytes => different signature (don't dedup distinct text).
         assert_ne!(a, paste_signature("%4", b"world"));
+        // Trailing-newline variants collide: the dual-handler delivers the
+        // same text with/without a trailing \n ("+N" vs "+N+1 lines"); both
+        // must dedup to the same signature.
+        assert_eq!(a, paste_signature("%4", b"hello\n"));
+        assert_eq!(a, paste_signature("%4", b"hello\r\n"));
+        assert_eq!(a, paste_signature("%4", b"hello\n\n"));
+        // But an interior newline is real content, not trailing — keep distinct.
+        assert_ne!(a, paste_signature("%4", b"hel\nlo"));
     }
 
     #[test]

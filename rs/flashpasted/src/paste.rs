@@ -143,6 +143,25 @@ pub async fn dispatch_text_paste(
     let bytes_len = text.bytes.len();
     let sanitized = sanitize_clipboard_text(&text.bytes);
 
+    // ─── Last-gate outcome guard ──────────────────────────────────────
+    // The daemon must NEVER write image/binary bytes into a pane as text.
+    // Every staging path *should* have rejected non-text already, but this
+    // is the single chokepoint all text pastes flow through, so guard here
+    // too: if the bytes we're about to paste aren't text, refuse and log a
+    // visible outcome instead of dumping a wall of `\x89PNG…` into the
+    // prompt. Cheap (a magic/NUL/UTF-8 check on the leading bytes).
+    if !crate::ipc::looks_like_text(sanitized.as_ref()) {
+        tracing::warn!(
+            pane,
+            kind = "text",
+            bytes = bytes_len,
+            outcome = "rejected-nontext",
+            "REFUSED text paste: payload is image/binary, not text (leak blocked at last gate)"
+        );
+        anyhow::bail!("refusing to paste non-text payload as text");
+    }
+    let html_sanitized = matches!(sanitized, std::borrow::Cow::Owned(_));
+
     // Single tmux fork: `load-buffer - ; paste-buffer` chained with tmux's
     // `;` command separator. tmux runs both commands in one process — the
     // load reads our text from stdin, then the paste writes the buffer into
@@ -181,7 +200,15 @@ pub async fn dispatch_text_paste(
         anyhow::bail!("tmux load-buffer;paste-buffer non-zero: {:?}", status);
     }
 
-    info!(pane, kind = "text", bytes = bytes_len, "PASTED text");
+    info!(
+        pane,
+        kind = "text",
+        bytes = bytes_len,
+        sent_bytes = sanitized.as_ref().len(),
+        html_sanitized,
+        outcome = "clean",
+        "PASTED text"
+    );
     Ok(())
 }
 
@@ -253,9 +280,9 @@ fn html_to_plaintext(text: &str) -> String {
         match name {
             "br" => out.push('\n'),
             // Block-level elements: ensure a newline boundary.
-            "p" | "/p" | "div" | "/div" | "section" | "/section" | "article"
-            | "/article" | "li" | "tr" | "/tr" | "h1" | "h2" | "h3" | "h4"
-            | "h5" | "h6" | "/h1" | "/h2" | "/h3" | "/h4" | "/h5" | "/h6" => {
+            "p" | "/p" | "div" | "/div" | "section" | "/section" | "article" | "/article"
+            | "li" | "tr" | "/tr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "/h1" | "/h2"
+            | "/h3" | "/h4" | "/h5" | "/h6" => {
                 if !out.ends_with('\n') && !out.is_empty() {
                     out.push('\n');
                 }
@@ -339,7 +366,7 @@ fn extract_blob_domain(tag: &str) -> Option<String> {
         .or_else(|| after_blob.strip_prefix("http://"))
         .unwrap_or(after_blob);
     let end = after_scheme
-        .find(|c: char| c == '/' || c == '"' || c == '\'' || c == ' ')
+        .find(['/', '"', '\'', ' '])
         .unwrap_or(after_scheme.len());
     let domain = &after_scheme[..end];
     if domain.is_empty() {
@@ -425,10 +452,7 @@ mod tests {
     fn block_elements_add_newlines() {
         let input = b"<div>first</div><div>second</div>";
         let out = sanitize_clipboard_text(input);
-        assert_eq!(
-            std::str::from_utf8(out.as_ref()).unwrap(),
-            "first\nsecond"
-        );
+        assert_eq!(std::str::from_utf8(out.as_ref()).unwrap(), "first\nsecond");
     }
 
     #[test]
@@ -441,6 +465,22 @@ mod tests {
             std::str::from_utf8(out.as_ref()).unwrap(),
             "price & quality <= great > average yes"
         );
+    }
+
+    #[test]
+    fn text_path_rejects_image_bytes() {
+        // The last-gate guard: PNG bytes that somehow reached the text path
+        // must be refused, not pasted as a wall of garbage.
+        let png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x01\x00";
+        let sanitized = sanitize_clipboard_text(png);
+        assert!(!crate::ipc::looks_like_text(sanitized.as_ref()));
+    }
+
+    #[test]
+    fn text_path_accepts_real_text() {
+        let t = b"see https://example.com/p?x=1 for details";
+        let sanitized = sanitize_clipboard_text(t);
+        assert!(crate::ipc::looks_like_text(sanitized.as_ref()));
     }
 
     #[test]
