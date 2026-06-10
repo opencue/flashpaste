@@ -45,8 +45,13 @@ resolve_kitty_sock() {
   fi
   local base s
   base="/run/user/$(id -u)/kitty-main"
-  # Newest matching socket first; `kitty-main-<pid>` is what kitty creates.
-  for s in $(ls -1t "$base"-* "$base" 2>/dev/null); do
+  # Direct shell glob — no `ls`, no word-splitting (paths with spaces stay
+  # intact). kitty creates `kitty-main-<pid>`; with one instance there's
+  # exactly one match. With several this picks the first lexically — good
+  # enough for the common single-instance case, and a wrong guess only falls
+  # through to the normal paste path (the daemon's dedup is the backstop). If
+  # the glob matches nothing it stays literal and fails the `-S` test below.
+  for s in "$base"-* "$base"; do
     [ -S "$s" ] && { printf 'unix:%s\n' "$s"; return 0; }
   done
   # Last-ditch: hand back the bare path; kitten will fail and we fall through
