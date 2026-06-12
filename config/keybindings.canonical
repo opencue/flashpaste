@@ -8,10 +8,18 @@
 # Format: one rule per non-comment line:  <surface> <key> <must-contain-substring>
 # The check passes when the live config's binding for <key> contains the
 # substring. Keep substrings stable (script basenames), not full command lines.
+# The special substring UNBOUND inverts the rule: the surface must NOT bind
+# the key at all.
 
-# kitty's Ctrl+V must route through the tmux-aware router (suppresses kitty's
-# handler inside tmux so only tmux's bind fires — see kitty-paste-router.sh).
-kitty  ctrl+v  kitty-paste-router.sh
+# kitty must NOT intercept Ctrl+V (retired 2026-06-10). The tmux-aware router
+# needed `kitten @ ls` focus + foreground-process detection, which XWayland
+# kitty does not provide (every window reports is_focused=false and empty
+# foreground_processes), so the router always took the slow fallthrough
+# (background launch, seconds under load) and its late second fire landed
+# outside the daemon's dedup window -> double paste. With no kitty map the
+# key reaches the application: tmux's own bind handles tmux windows (~5ms,
+# correct pane), and Claude Code reads the clipboard itself elsewhere.
+kitty  ctrl+v  UNBOUND
 
 # tmux's root Ctrl+V must hit the fast Rust trigger (daemon), falling back to
 # the bash dispatcher when the daemon is down.
