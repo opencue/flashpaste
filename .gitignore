@@ -5,3 +5,6 @@
 dist/
 *.deb
 .claude/
+
+# Local agent/session state
+.omx/
