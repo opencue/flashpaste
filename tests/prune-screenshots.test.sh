@@ -30,15 +30,21 @@ check "first run writes the stamp" [ -e "$T/state/flashpaste/screenshot-prune-si
 # Screenshots taken afterwards. The stamp is back-dated so "3 days ago" counts as newer.
 touch -d '30 days ago' "$T/state/flashpaste/screenshot-prune-since"
 for i in 1 2 3 4 5; do touch -d "$((i + 2)) days ago" "$T/shots/old-$i.png"; done
-touch -d '3 days ago' "$T/shots/old-1.png.fpc.webp" "$T/shots/notes.txt" "$T/shots/sub/nested.png"
+touch -d '3 days ago' "$T/shots/notes.txt" "$T/shots/sub/nested.png"
+# Compressed siblings are written just after their original, so they sort above it.
+touch -d '3 days ago + 1 second' "$T/shots/old-1.png.fpc.webp"
+touch -d '6 days ago + 1 second' "$T/shots/old-4.png.fpc.webp"
+touch -d '2 days ago' "$T/shots/gone.png.fpc.webp"
 touch "$T/shots/fresh-1.png" "$T/shots/fresh-2.png"
 
 FLASHPASTE_SCREENSHOT_KEEP=3 "$PRUNE" --dry-run >/dev/null
-check "dry run removes nothing" [ "$(count)" -eq 11 ]
+check "dry run removes nothing" [ "$(count)" -eq 13 ]
 
 FLASHPASTE_SCREENSHOT_KEEP=3 "$PRUNE" >/dev/null
 check "fresh screenshots stay" [ -e "$T/shots/fresh-1.png" -a -e "$T/shots/fresh-2.png" ]
-check "the newest old one fills the keep quota" [ -e "$T/shots/old-1.png" -o -e "$T/shots/old-1.png.fpc.webp" ]
+check "the newest old one fills the keep quota, with its compressed sibling" [ -e "$T/shots/old-1.png" -a -e "$T/shots/old-1.png.fpc.webp" ]
+check "a removed screenshot takes its compressed sibling along" [ ! -e "$T/shots/old-4.png.fpc.webp" ]
+check "an orphaned compressed sibling is removed" [ ! -e "$T/shots/gone.png.fpc.webp" ]
 check "older screenshots are removed" [ ! -e "$T/shots/old-4.png" -a ! -e "$T/shots/old-5.png" ]
 check "the pre-existing library is untouched" [ -e "$T/shots/library-1.png" -a -e "$T/shots/library-2.png" ]
 check "non-image files are untouched" [ -e "$T/shots/notes.txt" ]

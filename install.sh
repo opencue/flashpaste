@@ -150,11 +150,12 @@ say "wrote flashpaste-prune-screenshots.{service,timer}"
 
 # GNOME: hide the shell's own "Screenshot captured" notifications (no Settings
 # switch exists for them). Takes effect after the next login on Wayland.
-if command -v gnome-shell >/dev/null 2>&1; then
+if command -v gnome-shell >/dev/null 2>&1 && command -v gnome-extensions >/dev/null 2>&1; then
   EXT_UUID="hide-screenshot-notifications@flashpaste"
   EXT_DST="$HOME/.local/share/gnome-shell/extensions/$EXT_UUID"
   mkdir -p "$EXT_DST"
-  cp "$REPO_DIR/share/gnome-shell/extensions/$EXT_UUID/"* "$EXT_DST/"
+  cp "$REPO_DIR/share/gnome-shell/extensions/$EXT_UUID/extension.js" \
+     "$REPO_DIR/share/gnome-shell/extensions/$EXT_UUID/metadata.json" "$EXT_DST/"
   gnome-extensions enable "$EXT_UUID" >/dev/null 2>&1 \
     || warn "log out and back in, then run: gnome-extensions enable $EXT_UUID"
   say "installed GNOME extension $EXT_UUID"

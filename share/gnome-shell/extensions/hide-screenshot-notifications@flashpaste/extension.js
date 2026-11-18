@@ -24,9 +24,10 @@ export default class HideScreenshotNotifications extends Extension {
         if (this._trayId)
             Main.messageTray.disconnect(this._trayId);
         this._trayId = 0;
-        for (const [source, id] of this._sources) {
+        for (const [source, ids] of this._sources) {
             try {
-                source.disconnect(id);
+                for (const id of ids)
+                    source.disconnect(id);
             } catch (_e) {
                 // the source is already gone
             }
@@ -40,10 +41,10 @@ export default class HideScreenshotNotifications extends Extension {
     _watch(source) {
         if (source?.iconName !== SCREENSHOT_SOURCE_ICON || this._sources.has(source))
             return;
-        const id = source.connect('notification-added',
+        const addedId = source.connect('notification-added',
             (_source, notification) => this._dismissLater(notification));
-        this._sources.set(source, id);
-        source.connect('destroy', () => this._sources?.delete(source));
+        const destroyId = source.connect('destroy', () => this._sources?.delete(source));
+        this._sources.set(source, [addedId, destroyId]);
         for (const notification of [...(source.notifications ?? [])])
             this._dismissLater(notification);
     }

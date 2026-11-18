@@ -8,9 +8,9 @@
 # This removes screenshots that are BOTH older than FLASHPASTE_SCREENSHOT_MAX_AGE_HOURS
 # (default 24) AND not among the newest FLASHPASTE_SCREENSHOT_KEEP (default 20).
 #
-# Only files that appeared after this pruner was first run are ever touched: the
+# Only files modified after this pruner was first run are ever touched: the
 # first run drops a stamp file and exits, so an existing screenshot library is
-# left alone. Set FLASHPASTE_SCREENSHOT_PRUNE_EXISTING=1 to include it.
+# left alone (and so is a file copied in later with an old modification time). Set FLASHPASTE_SCREENSHOT_PRUNE_EXISTING=1 to include it.
 #
 # Usage: flashpaste-prune-screenshots.sh [--dry-run]
 set -euo pipefail
@@ -41,9 +41,12 @@ if [[ "${FLASHPASTE_SCREENSHOT_PRUNE_EXISTING:-0}" != "1" ]]; then
 fi
 
 # Newest first; only regular image files directly in the dir (no recursion).
+# The daemon's compressed siblings (<name>.fpc.<ext>) are not screenshots of
+# their own: they must not use up the keep quota, and go with their original.
 mapfile -d '' -t files < <(
   find "$DIR" -maxdepth 1 -type f \
     \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.webp' \) \
+    -not -name '*.fpc.*' \
     "${newer_than_stamp[@]}" -printf '%T@\t%p\0' | sort -z -rn | cut -z -f2-
 )
 
@@ -59,10 +62,17 @@ for f in "${files[@]}"; do
   if (( DRY_RUN )); then
     echo "would remove: $f"
   else
-    rm -f -- "$f"
+    rm -f -- "$f" "$f".fpc.*
   fi
   removed=$((removed + 1))
 done
+
+# Siblings whose original is gone (deleted by hand, or by an earlier version).
+if (( ! DRY_RUN )); then
+  while IFS= read -r -d '' sibling; do
+    [[ -e "${sibling%.fpc.*}" ]] || rm -f -- "$sibling"
+  done < <(find "$DIR" -maxdepth 1 -type f -name '*.fpc.*' "${newer_than_stamp[@]}" -print0)
+fi
 
 if (( DRY_RUN )); then
   echo "flashpaste-prune-screenshots: would remove ${removed} of ${#files[@]} screenshot(s)"
