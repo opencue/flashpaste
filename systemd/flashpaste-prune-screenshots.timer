@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly screenshot retention (flashpaste)
+Documentation=https://github.com/NagyVikt/flashpaste
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,7 @@
+{
+  "uuid": "hide-screenshot-notifications@flashpaste",
+  "name": "Hide screenshot notifications",
+  "description": "Removes GNOME's 'Screenshot captured' entries from the notification list. With flashpaste every capture is pasted straight away, so the list only fills up with them.",
+  "shell-version": ["45", "46", "47", "48"],
+  "url": "https://github.com/NagyVikt/flashpaste"
+}
