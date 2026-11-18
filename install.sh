@@ -142,6 +142,25 @@ ExecStart=%h/.local/bin/flashpaste-screenshot-preload.sh
 EOF
 say "wrote flashpaste-screenshot-watcher.{path,service}"
 
+# Screenshot retention — hourly: screenshots older than a day (beyond the newest
+# 20) are removed. Screenshots that existed before the first run are left alone.
+ln -sf "$BIN_SRC/flashpaste-prune-screenshots.sh" "$BIN_DST/flashpaste-prune-screenshots"
+cp "$REPO_DIR/systemd/flashpaste-prune-screenshots.service" "$REPO_DIR/systemd/flashpaste-prune-screenshots.timer" "$SYSTEMD_DST/"
+say "wrote flashpaste-prune-screenshots.{service,timer}"
+
+# GNOME: hide the shell's own "Screenshot captured" notifications (no Settings
+# switch exists for them). Takes effect after the next login on Wayland.
+if command -v gnome-shell >/dev/null 2>&1 && command -v gnome-extensions >/dev/null 2>&1; then
+  EXT_UUID="hide-screenshot-notifications@flashpaste"
+  EXT_DST="$HOME/.local/share/gnome-shell/extensions/$EXT_UUID"
+  mkdir -p "$EXT_DST"
+  cp "$REPO_DIR/share/gnome-shell/extensions/$EXT_UUID/extension.js" \
+     "$REPO_DIR/share/gnome-shell/extensions/$EXT_UUID/metadata.json" "$EXT_DST/"
+  gnome-extensions enable "$EXT_UUID" >/dev/null 2>&1 \
+    || warn "log out and back in, then run: gnome-extensions enable $EXT_UUID"
+  say "installed GNOME extension $EXT_UUID"
+fi
+
 cat > "$SYSTEMD_DST/flashpaste-overlayd.service" <<'EOF'
 [Unit]
 Description=flashpaste overlay daemon (agent-driven screen annotations)
@@ -180,6 +199,7 @@ fi
 systemctl --user daemon-reload
 systemctl --user enable --now clipboard-janitor.service
 systemctl --user enable --now flashpaste-screenshot-watcher.path
+systemctl --user enable --now flashpaste-prune-screenshots.timer
 if [ -x "$BIN_DST/flashpaste-overlayd" ]; then
   if systemctl --user enable --now flashpaste-overlayd.service; then
     say "enabled flashpaste-overlayd"

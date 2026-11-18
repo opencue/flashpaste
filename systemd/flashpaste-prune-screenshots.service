@@ -1,0 +1,7 @@
+[Unit]
+Description=Remove old screenshots flashpaste no longer needs
+Documentation=https://github.com/NagyVikt/flashpaste
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/flashpaste-prune-screenshots

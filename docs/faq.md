@@ -132,3 +132,14 @@ Check the GitHub Actions run logs — usually a transient apt-get failure. `gh r
 ### Q. How do I run the test suite?
 
 Bash syntax: `bash -n bin/*.sh install.sh bootstrap.sh`. Rust: `cargo test --manifest-path rs/Cargo.toml` (currently no in-tree tests; manual timing telemetry is the test bed). Pre-flight: `make doctor`.
+
+### Q. My `~/Pictures/Screenshots/` fills up. Can flashpaste stop keeping every screenshot?
+
+Yes. The file has to exist while a screenshot is being pasted (the agent is handed its path), so flashpaste does not stop GNOME from saving it — it cleans up afterwards. `flashpaste-prune-screenshots.timer` runs hourly and removes screenshots that are older than 24 hours and not among the newest 20. Tune it with `FLASHPASTE_SCREENSHOT_MAX_AGE_HOURS` and `FLASHPASTE_SCREENSHOT_KEEP` (a systemd drop-in for `flashpaste-prune-screenshots.service`).
+
+Screenshots that were already there when the pruner first ran are never touched. To clear that backlog too, run once: `FLASHPASTE_SCREENSHOT_PRUNE_EXISTING=1 flashpaste-prune-screenshots` (add `--dry-run` first to see what would go).
+
+### Q. Can I get rid of GNOME's "Screenshot captured" notifications?
+
+GNOME Shell posts one per capture and Settings has no switch for it. The installer adds a small extension, `hide-screenshot-notifications@flashpaste`, that removes them from the notification list. On Wayland a new extension is only picked up at the next login.
+
