@@ -54,10 +54,18 @@ bind -n MouseDown2Pane run-shell -b "buf=$(sh -c '#{@paste}'); if [ -n \"$buf\" 
 # until Escape; that reproduced on tmux <3.4 only, and removing `-O`
 # made the menu hide as soon as the mouse moved toward an entry,
 # which is worse. v1.23 restores it.
-bind -n MouseDown3Pane display-menu -O -x M -y M \
+# Optional on Linux with a recent Codex TUI:
+# set -g @flashpaste-native-codex-image on
+# The helper only stages the reference; tmux loads and bracket-pastes
+# it in the original client's queue without another tmux connection.
+bind -n MouseDown3Pane display-menu -O -t '{mouse}' -x M -y M \
   -T "#[align=centre,fg=#FFFFFF,bold] pane #{pane_index} " \
   "#[fg=#34C759]↳ Paste" p \
-    "run-shell -b \"TMUX_PASTE_TRIGGER=right-click-menu flashpaste-trigger '#{pane_id}' 2>/dev/null || TMUX_PASTE_TRIGGER=right-click-menu tmux-paste-dispatch '#{pane_id}' 2>/dev/null || TMUX_PASTE_TRIGGER=right-click-menu tmux-paste-dispatch.sh '#{pane_id}'\""
+    { if-shell "flashpaste-paste-codex-image.sh #{q:@flashpaste-native-codex-image} #{pane_in_mode} #{pane_pid} #{pid}-#{client_pid}" {
+        run-shell -C "load-buffer -b flashpaste-codex-#{client_pid} /tmp/flashpaste-codex-#{pid}/ref-#{pid}-#{client_pid} ; paste-buffer -d -p -b flashpaste-codex-#{client_pid} -t #{pane_id}"
+      } {
+        run-shell -b "TMUX_PASTE_TRIGGER=right-click-menu flashpaste-trigger '#{pane_id}' 2>/dev/null || TMUX_PASTE_TRIGGER=right-click-menu tmux-paste-dispatch '#{pane_id}' 2>/dev/null || TMUX_PASTE_TRIGGER=right-click-menu tmux-paste-dispatch.sh '#{pane_id}'"
+      } }
 
 # Recursion-guard note: the C-v binding above intentionally re-invokes
 # the dispatcher when kitty `send-text` injects a \026 byte. The
