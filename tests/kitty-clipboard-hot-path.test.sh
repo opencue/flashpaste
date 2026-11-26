@@ -61,9 +61,9 @@ grep -q 'x .*TARGETS' "$CALLS"
 grep -q 'kitty .* send-text' "$CALLS"
 forbidden 'wl --no-newline|x .*text/plain'
 
-run fallback
+FLASHPASTE_CAPTURE_NAME=fallback.png run fallback
 grep -q 'x .*image/png' "$CALLS"
-cmp "$PNG" "$FLASHPASTE_CAPTURE_DIR/flashpaste-clip-latest.png"
+cmp "$PNG" "$FLASHPASTE_CAPTURE_DIR/fallback.png"
 
 status=0
 MODE=bad bash "$root/bin/flashpaste-capture-clip" >"$tmp/failed-path" || status=$?

@@ -58,7 +58,6 @@ pick_mime() {
 }
 
 valid_image() {
-  [ -s "$tmp" ] || return 1
   local magic
   # X11 can return text bytes despite the requested image target.
   magic=$(head -c 12 "$tmp" | od -An -tx1 | tr -d ' \n')
@@ -72,10 +71,18 @@ valid_image() {
 stage() {
   if [ -z "$tmp" ]; then
     mkdir -p -- "$DEST_DIR" || return 1
-    # Keep temporary bytes in the destination filesystem for a single atomic rename.
+    # Same filesystem for atomic rename. The watcher ignores the random
+    # six-character extension because it isn't png, jpg, or jpeg.
     tmp=$(mktemp -- "$DEST_DIR/.flashpaste-capture.XXXXXX") || return 1
   fi
-  timeout 0.5 "$@" >"$tmp" 2>/dev/null && valid_image
+  if ! timeout 0.5 "$@" >"$tmp" 2>/dev/null || [ ! -s "$tmp" ]; then
+    clog "capture-clip" "event=read-failed-or-empty" "reader='${1##*/}'" "mime='$mime'"
+    return 1
+  fi
+  if ! valid_image; then
+    clog "capture-clip" "event=bad-image-magic" "reader='${1##*/}'" "mime='$mime'"
+    return 1
+  fi
 }
 
 tmp=
