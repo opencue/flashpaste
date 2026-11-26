@@ -40,7 +40,13 @@ export default class FlashPasteClipboard extends Extension {
         this._transfer?.cancel();
         Gio.bus_unown_name(this._nameId);
         this._service.unexport();
-        this._tokenFile.delete(null);
+        this._token = null;
+        try {
+            this._tokenFile.delete(null);
+        } catch (error) {
+            if (!error.matches(Gio.io_error_quark(), Gio.IOErrorEnum.NOT_FOUND))
+                throw error;
+        }
     }
 
     async ReadPasteAsync([token, handle], invocation) {

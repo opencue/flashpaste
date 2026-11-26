@@ -20,6 +20,10 @@ case "$*" in
   "-t image/png")
     [ "${WL_READ_DELAY:-0}" = 0 ] || sleep "$WL_READ_DELAY"
     write_png "${WL_BYTES:-32}"
+    if [ "${BRIDGE_KIND:-}" = late ]; then
+        : >"$TEST_TMP/fallback-wrote"
+        until [ -e "$TEST_TMP/bridge-wrote" ]; do sleep .01; done
+    fi
     ;;
   *) exit 2 ;;
 esac
@@ -182,6 +186,14 @@ cat >"$tmp/flashpaste-gnome-clipboard" <<'END'
 case "${BRIDGE_KIND:-}" in
     png) . "$TEST_TMP/png-fixture"; write_png 80 >&3; printf 'png\n' ;;
     text) cat "$TEST_TMP/live-text" >&3; printf 'text\n' ;;
+    late)
+        (
+            while [ ! -e "$TEST_TMP/fallback-wrote" ]; do sleep .01; done
+            printf 'late write' >&3
+            : >"$TEST_TMP/bridge-wrote"
+        ) </dev/null >/dev/null 2>&1 &
+        exit 1
+        ;;
     *) exit 1 ;;
 esac
 END
@@ -196,9 +208,39 @@ cmp "$tmp/live-text" "$ref"
 [[ $(stat -c '%a' "$ref") = 600 ]]
 ! env WAYLAND_DISPLAY=wayland-0 FLASHPASTE_REAL_WL_PASTE=/bin/false BRIDGE_KIND=text \
     "$probe" on 0 100 "$token" || exit 1 # old menu must never leave a text reference
-env WAYLAND_DISPLAY=wayland-0 WL_TYPES=image/png "$probe" on 0 100 "$token" clipboard
+env WAYLAND_DISPLAY=wayland-0 WL_TYPES=image/png BRIDGE_KIND=late "$probe" on 0 100 "$token" clipboard
 [[ -f $(staged_path) ]]
 rm -- "$tmp/flashpaste-gnome-clipboard"
+
+# Validate real client-side size and terminal-safe text checks, without GNOME.
+if [[ -x /usr/bin/python3 ]]; then
+    /usr/bin/python3 - "$repo/bin/flashpaste-gnome-clipboard" <<'PY'
+import os
+import runpy
+import sys
+import tempfile
+
+valid = runpy.run_path(sys.argv[1])["valid_payload"]
+with tempfile.TemporaryFile() as data:
+    for kind, value, expected in (
+        ("text", "árvíz\t\r\n".encode(), True),
+        ("text", b"", False),
+        ("text", b"\x1b[201~", False),
+        ("text", "\u009b201~".encode(), False),
+        ("text", b"\xff", False),
+        ("unknown", b"contents", False),
+        ("png", b"\x89PNG", True),  # the attachment writer checks PNG framing
+    ):
+        data.seek(0)
+        data.truncate()
+        data.write(value)
+        data.flush()
+        assert valid(kind, data.fileno()) == expected
+    for kind, max_size in [("text", 1024 * 1024), ("png", 16 * 1024 * 1024)]:
+        os.ftruncate(data.fileno(), max_size + 1)
+        assert not valid(kind, data.fileno())
+PY
+fi
 
 # Clean stale client slots only when room is actually needed.
 for ((i=100; i<356; i++)); do

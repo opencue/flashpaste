@@ -137,6 +137,10 @@ if [[ -n $bridge ]]; then
     else
         kind=
         probe_clipboard || exit 1
+        # The compositor owns a duplicate of FD 3 and may finish writing
+        # after our client times out. Never give the fallback that inode.
+        unlink -- "$image" || native_fallback cache-unlink "$?"
+        image=$(mktemp --suffix=.png "$dir/image.XXXXXXXX") || native_fallback cache-create "$?"
     fi
 fi
 if [[ -z $kind ]]; then

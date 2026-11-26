@@ -4,28 +4,46 @@ import os
 import sys
 from pathlib import Path
 
-try:
-    from gi.repository import Gio, GLib
+def valid_payload(kind, fd):
+    size = os.fstat(fd).st_size
+    if kind == "png":
+        return 0 < size <= 16 * 1024 * 1024
+    if kind != "text" or not 0 < size <= 1024 * 1024:
+        return False
+    try:
+        content = os.pread(fd, size, 0).decode("utf-8")
+    except UnicodeError:
+        return False
+    return not any(
+        (ord(char) < 32 and char not in "\t\r\n") or 127 <= ord(char) < 160
+        for char in content
+    )
+
+
+def main():
+    try:
+        from gi.repository import Gio, GLib
+    except ImportError:
+        return 1
 
     name = "org.flashpaste.Clipboard"
-    token = (Path(GLib.get_user_runtime_dir()) / "flashpaste-clipboard.token").read_text(encoding="ascii")
-    fd_list = Gio.UnixFDList.new()
-    handle = fd_list.append(3)
-    reply, _ = Gio.bus_get_sync(Gio.BusType.SESSION).call_with_unix_fd_list_sync(
-        name, "/org/flashpaste/Clipboard", name, "ReadPaste",
-        GLib.Variant("(sh)", (token, handle)), GLib.VariantType.new("(s)"),
-        Gio.DBusCallFlags.NO_AUTO_START, 750, fd_list, None,
-    )
-    kind, = reply.unpack()
-    size = os.fstat(3).st_size
-    if kind == "text" and 0 < size <= 1024 * 1024:
-        content = os.pread(3, size, 0).decode("utf-8")
-        if any((ord(char) < 32 and char not in "\t\r\n") or ord(char) == 127 for char in content):
-            sys.exit(1)
-    elif kind != "png" or not 0 < size <= 16 * 1024 * 1024:
-        sys.exit(1)
+    try:
+        token = (Path(GLib.get_user_runtime_dir()) / "flashpaste-clipboard.token").read_text(encoding="ascii")
+        fd_list = Gio.UnixFDList.new()
+        handle = fd_list.append(3)
+        reply, _ = Gio.bus_get_sync(Gio.BusType.SESSION).call_with_unix_fd_list_sync(
+            name, "/org/flashpaste/Clipboard", name, "ReadPaste",
+            GLib.Variant("(sh)", (token, handle)), GLib.VariantType.new("(s)"),
+            Gio.DBusCallFlags.NO_AUTO_START, 750, fd_list, None,
+        )
+        kind, = reply.unpack()
+        if not valid_payload(kind, 3):
+            return 1
+    except (GLib.Error, OSError, UnicodeError):
+        return 1
     print(kind)
-except (ImportError, OSError, UnicodeError):
-    sys.exit(1)
-except GLib.Error:
-    sys.exit(1)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
