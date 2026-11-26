@@ -5,7 +5,7 @@ set -euo pipefail
 
 [[ ${1:-} == on && ${2:-} == 0 && ${3:-} =~ ^[1-9][0-9]*$ ]] || exit 1
 [[ ${4:-} =~ ^[1-9][0-9]*-[1-9][0-9]*$ ]] || exit 1
-[[ -z ${5:-} || $5 == screenshot ]] || exit 1
+case "${5:-}" in ""|screenshot|clipboard) ;; *) exit 1 ;; esac
 client_token=$4
 
 # The pane's current command can be "node" when Codex was launched through
@@ -102,14 +102,21 @@ elif [ -n "${DISPLAY:-}" ]; then
 else
     exit 1
 fi
-if [[ $backend != screenshot ]]; then
+probe_clipboard() {
+    [[ $backend != screenshot ]] || return 0
     types=$(timeout -k 0.05s 0.10s "${probe_types[@]}" 2>/dev/null) || {
         status=$?
         case $status in 124|137) native_fallback probe-types "$status" ;; esac
         exit 1 # e.g. no clipboard selection; normal, don't log every text paste
     }
-    has_pasteable_png "$types" || exit 1
+    has_pasteable_png "$types"
+}
+
+bridge=
+if [[ $backend == wayland && ${5:-} == clipboard ]]; then
+    bridge=$(command -v flashpaste-gnome-clipboard) || :
 fi
+[[ -n $bridge ]] || probe_clipboard || exit 1
 
 umask 077
 dir=${XDG_CACHE_HOME:-$HOME/.cache}/flashpaste/codex-attachments
@@ -122,7 +129,21 @@ image=$(mktemp --suffix=.png "$dir/image.XXXXXXXX") || native_fallback cache-cre
 trap 'rm -f -- "$image"' EXIT
 # Write straight to the attachment instead of relaying the PNG through a pipe.
 # Leave one extra KiB so even a truncated oversized write fails the size check.
-{
+kind=
+if [[ -n $bridge ]]; then
+    kind=$(timeout -k 0.05s 0.85s "$bridge" 3<>"$image" 2>/dev/null) || kind=
+    if [[ $kind == png || $kind == text ]]; then
+        backend=gnome
+    else
+        kind=
+        probe_clipboard || exit 1
+        # The compositor owns a duplicate of FD 3 and may finish writing
+        # after our client times out. Never give the fallback that inode.
+        unlink -- "$image" || native_fallback cache-unlink "$?"
+        image=$(mktemp --suffix=.png "$dir/image.XXXXXXXX") || native_fallback cache-create "$?"
+    fi
+fi
+if [[ -z $kind ]]; then
     (
         set +o posix # Bash uses 1 KiB units for ulimit -f outside POSIX mode.
         limit=$(ulimit -Sf)
@@ -131,14 +152,16 @@ trap 'rm -f -- "$image"' EXIT
         fi
         ulimit -Sc 0 || exit 1
         exec timeout -k 0.05s "$read_timeout" "${read_png[@]}"
-    ) >"$image"
-} 2>/dev/null || native_fallback read-png "$?"
-size=$(wc -c <"$image") || native_fallback png-size "$?"
-(( size >= 45 && size <= 16777216 )) || native_fallback png-size
-header=$(od -An -tx1 -N16 "$image") || native_fallback png-header "$?"
-[[ ${header//[[:space:]]/} == 89504e470d0a1a0a0000000d49484452 ]] || native_fallback png-header
-end=$(od -An -tx1 -j "$((size - 12))" -N12 -- "$image") || native_fallback png-footer "$?"
-[[ ${end//[[:space:]]/} == 0000000049454e44ae426082 ]] || native_fallback png-footer
+    ) >"$image" 2>/dev/null || native_fallback read-png "$?"
+fi
+if [[ $kind != text ]]; then
+    size=$(wc -c <"$image") || native_fallback png-size "$?"
+    (( size >= 45 && size <= 16777216 )) || native_fallback png-size
+    header=$(od -An -tx1 -N16 "$image") || native_fallback png-header "$?"
+    [[ ${header//[[:space:]]/} == 89504e470d0a1a0a0000000d49484452 ]] || native_fallback png-header
+    end=$(od -An -tx1 -j "$((size - 12))" -N12 -- "$image") || native_fallback png-footer "$?"
+    [[ ${end//[[:space:]]/} == 0000000049454e44ae426082 ]] || native_fallback png-footer
+fi
 # Reclaim old files only when needed for space. Never evict a recent draft
 # attachment; if the cache is still full, fall back to the dispatcher.
 cache_has_space() {
@@ -146,7 +169,7 @@ cache_has_space() {
     usage=$(du -sb -- "$dir") || return 1
     (( ${usage%%[[:space:]]*} <= 134217728 ))
 }
-if ! cache_has_space; then
+if [[ $kind != text ]] && ! cache_has_space; then
     find "$dir" -maxdepth 1 -type f -name 'image.????????.png' -mmin +1440 -delete || native_fallback cache-prune "$?"
     cache_has_space || native_fallback cache-full
 fi
@@ -169,6 +192,10 @@ if [[ ! -e $reference ]]; then
     fi
 fi
 trap 'rm -f -- "$image" "$reference"' EXIT
-quoted=${image//\'/\'\\\'\'}
-printf "'%s'" "$quoted" >"$reference" || native_fallback reference-write "$?"
+if [[ $kind == text ]]; then
+    mv -fT -- "$image" "$reference" || native_fallback reference-write "$?"
+else
+    quoted=${image//\'/\'\\\'\'}
+    printf "'%s'" "$quoted" >"$reference" || native_fallback reference-write "$?"
+fi
 trap - EXIT

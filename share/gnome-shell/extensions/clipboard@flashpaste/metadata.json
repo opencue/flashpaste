@@ -1,0 +1,7 @@
+{
+    "uuid": "clipboard@flashpaste",
+    "name": "FlashPaste clipboard reader",
+    "description": "Opt-in, windowless text and PNG paste for the local terminal.",
+    "shell-version": ["46"],
+    "version": 1
+}

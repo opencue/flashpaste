@@ -1,0 +1,49 @@
+#!/usr/bin/python3
+"""Write the live GNOME clipboard to FD 3; print only its payload kind."""
+import os
+import sys
+from pathlib import Path
+
+def valid_payload(kind, fd):
+    size = os.fstat(fd).st_size
+    if kind == "png":
+        return 0 < size <= 16 * 1024 * 1024
+    if kind != "text" or not 0 < size <= 1024 * 1024:
+        return False
+    try:
+        content = os.pread(fd, size, 0).decode("utf-8")
+    except UnicodeError:
+        return False
+    return not any(
+        (ord(char) < 32 and char not in "\t\r\n") or 127 <= ord(char) < 160
+        for char in content
+    )
+
+
+def main():
+    try:
+        from gi.repository import Gio, GLib
+    except ImportError:
+        return 1
+
+    name = "org.flashpaste.Clipboard"
+    try:
+        token = (Path(GLib.get_user_runtime_dir()) / "flashpaste-clipboard.token").read_text(encoding="ascii")
+        fd_list = Gio.UnixFDList.new()
+        handle = fd_list.append(3)
+        reply, _ = Gio.bus_get_sync(Gio.BusType.SESSION).call_with_unix_fd_list_sync(
+            name, "/org/flashpaste/Clipboard", name, "ReadPaste",
+            GLib.Variant("(sh)", (token, handle)), GLib.VariantType.new("(s)"),
+            Gio.DBusCallFlags.NO_AUTO_START, 750, fd_list, None,
+        )
+        kind, = reply.unpack()
+        if not valid_payload(kind, 3):
+            return 1
+    except (GLib.Error, OSError, UnicodeError):
+        return 1
+    print(kind)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
