@@ -887,19 +887,10 @@ pub(crate) async fn read_clipboard_image_if_present() -> Option<(Vec<u8>, &'stat
     }
 
     // Pick the best MIME advertised on either side.
-    let mime: &'static str = if let Some(m) = PREFERRED
+    let mime = PREFERRED
         .iter()
-        .find(|want| wl_types.iter().any(|t| t == *want) || x_types.iter().any(|t| t == *want))
-    {
-        match *m {
-            "image/png" => "image/png",
-            "image/jpeg" => "image/jpeg",
-            "image/webp" => "image/webp",
-            _ => return None,
-        }
-    } else {
-        return None;
-    };
+        .copied()
+        .find(|want| wl_types.iter().any(|t| t == *want) || x_types.iter().any(|t| t == *want))?;
 
     // ─── Read bytes: Wayland first ──────────────────────────────────
     let bytes: Option<Vec<u8>> = if has_image_wl {

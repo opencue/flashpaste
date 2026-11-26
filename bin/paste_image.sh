@@ -42,32 +42,6 @@ _clog_helper=$(command -v clip-pipeline-log.sh 2>/dev/null || true)
 type clog >/dev/null 2>&1 || clog() { :; }
 clog "paste-image" "event=invoked" "arg='${1:-}'" "KITTY_WINDOW_ID='${KITTY_WINDOW_ID:-}'" "KITTY_LISTEN_ON='${KITTY_LISTEN_ON:-}'"
 
-# Snapshot what's on clipboard for diagnostics — SYNCHRONOUS so the log
-# captures pre-paste state, not post-paste. On GNOME-46/mutter the
-# X11<->Wayland clipboard bridge is wedged: after a screenshot, xclip
-# keeps advertising image/png even once fresh text is copied. Capturing
-# both sides in one event makes that divergence visible at a glance.
-_wl_types=$(timeout 0.5 wl-paste --list-types 2>/dev/null | tr '\n' ',')
-_wl_rc=$?
-_x_types=$(timeout 0.5 xclip -selection clipboard -t TARGETS -o 2>/dev/null | tr '\n' ',')
-# Only call wl-paste a second time when the first probe actually answered.
-# When mutter's data-device is wedged --list-types already timed out and
-# --no-newline just adds another 500ms wait and another "wl-clipboard
-# ready" dock flash for no value.
-if [ "$_wl_rc" = "0" ] && [ -n "$_wl_types" ]; then
-  _wl_text=$(timeout 0.5 wl-paste --no-newline 2>/dev/null | head -c 120 | tr '\n\r\t' '   ')
-else
-  _wl_text=
-fi
-_x_text=$(timeout 0.5 xclip -selection clipboard -t text/plain -o 2>/dev/null | head -c 120 | tr '\n\r\t' '   ')
-case "$_wl_types,$_x_types" in *image/*) _has_image=1 ;; *) _has_image=0 ;; esac
-_stale=0
-if [ "$_has_image" = "1" ] && { [ -n "$_wl_text" ] || [ -n "$_x_text" ]; }; then _stale=1; fi
-clog "paste-image" "event=clip-snapshot" \
-  "wl_types='$_wl_types'" "x_types='$_x_types'" \
-  "wl_text='$_wl_text'" "x_text='$_x_text'" \
-  "has_image=$_has_image" "stale_mirror_suspected=$_stale"
-
 # Find the live kitty socket
 sock="${KITTY_LISTEN_ON:-}"
 if [ -z "$sock" ] || [ ! -S "${sock#unix:}" ]; then
@@ -88,8 +62,38 @@ clog "paste-image" "event=socket-resolved" "sock='$sock'"
 #                  makes Ctrl+V in kitty behave like the user expects:
 #                  paste whatever's on the clipboard, image or text.
 mode="${1:-auto}"
+if [ "$mode" = "auto" ] || [ "$mode" = "image" ]; then
+  capture_helper=$(command -v flashpaste-capture-clip 2>/dev/null)
+  if [ -z "$capture_helper" ] && [ -x "$_self_dir/flashpaste-capture-clip" ]; then
+    capture_helper="$_self_dir/flashpaste-capture-clip"
+  fi
+  if [ -n "$capture_helper" ]; then
+    # A single probe both chooses the paste mode and stages a browser image
+    # for the daemon. Exit 2 means image MIME was offered but staging failed;
+    # still send Ctrl-V so the TUI can read the clipboard itself.
+    capture_out=$("$capture_helper" 2>/dev/null)
+    capture_rc=$?
+    clog "paste-image" "event=capture" "rc=$capture_rc" "dest='$capture_out'"
+    if [ "$mode" = "auto" ]; then
+      case "$capture_rc" in
+        0|2) mode=image ;;
+        1) mode=text ;;
+      esac
+    fi
+    if [ "$capture_rc" = "0" ]; then
+      # Keep the existing inotify/X11 selection handoff window.
+      sleep 0.06
+    fi
+  fi
+fi
 if [ "$mode" = "auto" ]; then
-  if [ "$_has_image" = "1" ]; then
+  # Compatibility for standalone installs without the capture helper.
+  # Wayland is authoritative when it answers; don't read any text payload.
+  types=$(timeout 0.5 wl-paste --list-types 2>/dev/null) || types=
+  if [ -z "$types" ]; then
+    types=$(timeout 0.5 xclip -selection clipboard -t TARGETS -o 2>/dev/null) || types=
+  fi
+  if [[ $'\n'"$types" == *$'\n'image/* ]]; then
     mode=image
     clog "paste-image" "event=auto-route" "decision=image" "reason=clipboard-has-image"
   else
@@ -99,44 +103,6 @@ if [ "$mode" = "auto" ]; then
 fi
 
 if [ "$mode" = "image" ]; then
-  # Bridge the "browser Copy Image" case (ROADMAP.md:32). The flashpasted
-  # daemon's fast path is wired to inotify on ~/Pictures/Screenshots/, so
-  # an image copied from a browser (no file written) bypasses staging.
-  # Without staging there's nothing for Claude Code's wl-paste shim to
-  # fall back to — mutter blocks surfaceless reads of Firefox's Wayland
-  # selection, and Firefox under Wayland often doesn't mirror image
-  # bytes to the X11 selection either, so Claude gets 0 bytes.
-  #
-  # The capture helper reads the bytes from THIS context (kitty
-  # subprocess, often closer to the focused surface than the daemon's
-  # surfaceless connection), validates the magic, and writes them to
-  # ~/Pictures/Screenshots/flashpaste-clip-latest.png. The daemon's
-  # inotify watcher picks the file up and stages it in RAM, after which
-  # the existing X11/Wayland ownership path serves Claude correctly.
-  #
-  # Cost: one wl-paste + one xclip probe + one mv on every image paste
-  # (~30–80ms total). If the helper returns non-zero we proceed anyway
-  # — the existing send-text path remains the source of truth and any
-  # regression manifests as the old "no image attached" behaviour, not
-  # corruption.
-  capture_helper=$(command -v flashpaste-capture-clip 2>/dev/null)
-  if [ -z "$capture_helper" ] && [ -x "$(dirname "$0")/flashpaste-capture-clip" ]; then
-    capture_helper="$(dirname "$0")/flashpaste-capture-clip"
-  fi
-  if [ -n "$capture_helper" ]; then
-    capture_out=$("$capture_helper" 2>/dev/null)
-    capture_rc=$?
-    clog "paste-image" "event=capture" "rc=$capture_rc" "dest='$capture_out'"
-    if [ "$capture_rc" = "0" ]; then
-      # Give the daemon's inotify watcher one tick to fire IN_MOVED_TO,
-      # read the bytes (~5–20ms for a typical browser image), and notify
-      # the X11 owner to refresh. 60ms covers the 95th percentile on
-      # this stack; longer would add user-visible latency, shorter
-      # races the X11 SetSelectionOwner call.
-      sleep 0.06
-    fi
-  fi
-
   win="${KITTY_WINDOW_ID:-}"
   match=()
   [ -n "$win" ] && match=(--match "id:$win")

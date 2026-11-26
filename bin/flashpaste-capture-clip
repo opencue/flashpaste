@@ -49,89 +49,70 @@ REAL_WL_PASTE="${FLASHPASTE_REAL_WL_PASTE:-/usr/bin/wl-paste}"
 DEST_DIR="${FLASHPASTE_CAPTURE_DIR:-$HOME/Pictures/Screenshots}"
 DEST_NAME="${FLASHPASTE_CAPTURE_NAME:-flashpaste-clip-latest.png}"
 
-# Probe MIME types on both clipboard sides. Bail early if neither side
-# advertises an image — nothing to capture.
-wl_types=$(timeout 0.3 "$REAL_WL_PASTE" --list-types 2>/dev/null | tr '\n' ',')
-x_types=$(timeout 0.3 xclip -selection clipboard -t TARGETS -o 2>/dev/null | tr '\n' ',')
-case "$wl_types,$x_types" in
-  *image/*) ;;
-  *)
-    clog "capture-clip" "event=no-image-mime" "wl='$wl_types'" "x='$x_types'"
-    exit 1
-    ;;
-esac
+pick_mime() {
+  local types=$'\n'"$1"$'\n' want
+  for want in image/png image/jpeg image/webp; do
+    if [[ "$types" == *$'\n'"$want"$'\n'* ]]; then printf '%s\n' "$want"; return; fi
+  done
+  grep -m1 '^image/' <<<"$1"
+}
 
-# Pick the best advertised MIME. Prefer PNG (lossless, universally accepted
-# by Claude Code), then JPEG, then WebP. Anything else falls back to the
-# first image/* we can find.
-mime=
-for want in image/png image/jpeg image/webp; do
-  case "$wl_types,$x_types" in
-    *"$want"*) mime="$want"; break ;;
+valid_image() {
+  local magic
+  # X11 can return text bytes despite the requested image target.
+  magic=$(head -c 12 "$tmp" | od -An -tx1 | tr -d ' \n')
+  case "$mime:$magic" in
+    image/png:89504e470d0a1a0a*|image/jpeg:ffd8ff*|image/webp:52494646????????57454250*) return 0 ;;
+    image/png:*|image/jpeg:*|image/webp:*) return 1 ;;
+    *) return 0 ;; # Preserve existing support for other advertised image formats.
   esac
-done
-if [ -z "$mime" ]; then
-  mime=$(printf '%s,%s' "$wl_types" "$x_types" | tr ',' '\n' | grep -m1 '^image/' || true)
-fi
-if [ -z "$mime" ]; then
-  clog "capture-clip" "event=no-image-mime-after-pick"
+}
+
+stage() {
+  if [ -z "$tmp" ]; then
+    # Same filesystem for atomic rename. The watcher ignores the random
+    # six-character extension because it isn't png, jpg, or jpeg.
+    if ! mkdir -p -- "$DEST_DIR" || ! tmp=$(mktemp -- "$DEST_DIR/.flashpaste-capture.XXXXXX"); then
+      clog "capture-clip" "event=stage-failed" "dir='$DEST_DIR'"
+      exit 2
+    fi
+  fi
+  if ! timeout 0.5 "$@" >"$tmp" 2>/dev/null || [ ! -s "$tmp" ]; then
+    clog "capture-clip" "event=read-failed-or-empty" "reader='${1##*/}'" "mime='$mime'"
+    return 1
+  fi
+  if ! valid_image; then
+    clog "capture-clip" "event=bad-image-magic" "reader='${1##*/}'" "mime='$mime'"
+    return 1
+  fi
+}
+
+tmp=
+trap '[ -z "$tmp" ] || rm -f -- "$tmp"' EXIT
+src=
+wl_types=$(timeout 0.3 "$REAL_WL_PASTE" --list-types 2>/dev/null) || wl_types=
+mime=$(pick_mime "$wl_types") || mime=
+wl_mime=$mime
+# A fresh non-image selection is authoritative; X11 may still mirror an old image.
+if [ -n "$wl_types" ] && [ -z "$wl_mime" ]; then
+  clog "capture-clip" "event=no-image-mime" "src=wl-paste"
   exit 1
 fi
-
-mkdir -p "$DEST_DIR" 2>/dev/null || {
-  clog "capture-clip" "event=mkdir-failed" "dir='$DEST_DIR'"
-  exit 2
-}
-tmp=$(mktemp -t flashpaste-capture.XXXXXX) || exit 2
-trap 'rm -f "$tmp"' EXIT
-
-# Try real wl-paste first. On mutter from a surfaceless context this often
-# returns 0 bytes, but from a focused kitty subprocess it sometimes works
-# — and when it does, the bytes are exactly what the browser put there.
-src=
-if timeout 0.5 "$REAL_WL_PASTE" -t "$mime" >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+if [ -n "$mime" ] && stage "$REAL_WL_PASTE" -t "$mime"; then
   src=wl-paste
-fi
-
-# Fall back to xclip if wl-paste returned empty.
-if [ -z "$src" ]; then
-  if timeout 0.5 xclip -selection clipboard -t "$mime" -o >"$tmp" 2>/dev/null && [ -s "$tmp" ]; then
+else
+  x_types=$(timeout 0.3 xclip -selection clipboard -t TARGETS -o 2>/dev/null) || x_types=
+  mime=$(pick_mime "$x_types") || mime=
+  if [ -n "$mime" ] && stage xclip -selection clipboard -t "$mime" -o; then
     src=xclip
   fi
 fi
-
 if [ -z "$src" ]; then
-  clog "capture-clip" "event=read-empty" "mime='$mime'"
-  exit 2
-fi
-
-# Magic-byte check. xclip silently returns text bytes when the requested
-# MIME isn't actually advertised (the wl-paste shim has the same defence —
-# see bin/wl-paste:99-104). Without this check we'd happily write a
-# UTF-8 URL to flashpaste-clip-latest.png and the daemon would dutifully
-# stage it as an "image", clobbering whatever real image was staged.
-magic=$(head -c 12 "$tmp" | od -An -tx1 | tr -d ' \n')
-ok=0
-case "$mime" in
-  image/png)
-    case "$magic" in 89504e470d0a1a0a*) ok=1 ;; esac
-    ;;
-  image/jpeg)
-    case "$magic" in ffd8ff*) ok=1 ;; esac
-    ;;
-  image/webp)
-    # RIFF<4-byte len>WEBP — match RIFF prefix and WEBP at offset 8.
-    case "$magic" in 52494646????????57454250*) ok=1 ;; esac
-    ;;
-  *)
-    # Unknown image MIME: trust it if there's *any* binary content. Worst
-    # case the daemon stages bytes that won't decode in Claude; not worse
-    # than the current behaviour where nothing attaches at all.
-    [ -s "$tmp" ] && ok=1
-    ;;
-esac
-if [ "$ok" = "0" ]; then
-  clog "capture-clip" "event=bad-magic" "mime='$mime'" "magic='$magic'" "src='$src'"
+  if [ -z "$wl_mime$mime" ]; then
+    clog "capture-clip" "event=no-image-mime"
+    exit 1
+  fi
+  clog "capture-clip" "event=read-or-stage-failed" "wl_mime='$wl_mime'" "x_mime='$mime'"
   exit 2
 fi
 
@@ -145,15 +126,10 @@ case "$mime,$DEST_NAME" in
   image/webp,flashpaste-clip-latest.png) dest="$DEST_DIR/flashpaste-clip-latest.webp" ;;
 esac
 
-# Atomic rename so the daemon's inotify watcher sees one IN_MOVED_TO
-# instead of an IN_CLOSE_WRITE on a partially-written file. mktemp lives
-# on the same filesystem as $HOME on a default setup; if mv fails across
-# filesystems we copy then delete (less atomic but still complete-bytes).
-if ! mv -f "$tmp" "$dest" 2>/dev/null; then
-  if ! cp -f "$tmp" "$dest" 2>/dev/null; then
-    clog "capture-clip" "event=write-failed" "dest='$dest'"
-    exit 2
-  fi
+# The watcher sees IN_MOVED_TO only after the whole image is present.
+if ! mv -fT -- "$tmp" "$dest" 2>/dev/null; then
+  clog "capture-clip" "event=write-failed" "dest='$dest'"
+  exit 2
 fi
 # Clear the trap so we don't try to rm $tmp after a successful mv.
 trap - EXIT
