@@ -155,6 +155,26 @@ assert_probe 1 DISPLAY=:1 X_TYPES=image/png
 [[ -f $second ]]
 rm "$cache/image.AAAAAAAA.png"
 
+# A dedicated screenshot action never touches the clipboard (even if it now
+# contains text), never chooses an expired file, and copies immutable bytes.
+shots="$tmp/Screen shots"
+mkdir -- "$shots"
+bash -c '. "$TEST_TMP/png-fixture"; write_png 70' >"$shots/Screenshot from older.png"
+bash -c '. "$TEST_TMP/png-fixture"; write_png 100' >"$shots/Screenshot from newest.png"
+bash -c '. "$TEST_TMP/png-fixture"; write_png 150' >"$shots/flashpaste-clip-latest.png"
+touch -d '25 seconds ago' "$shots/Screenshot from older.png"
+touch -d '5 seconds ago' "$shots/Screenshot from newest.png"
+run_screenshot() {
+    rm -f -- "$ref"
+    env WAYLAND_DISPLAY=wayland-0 FLASHPASTE_REAL_WL_PASTE=/bin/false DISPLAY=:1 X_TYPES=image/png \
+        FLASHPASTE_SCREENSHOTS_DIR="$shots" "$probe" on 0 100 "$token" screenshot
+}
+run_screenshot
+cmp -- "$shots/Screenshot from newest.png" "$(staged_path)"
+touch -d '2 minutes ago' "$shots/"Screenshot*.png
+! run_screenshot || exit 1
+[[ ! -e $ref ]]
+
 # Clean stale client slots only when room is actually needed.
 for ((i=100; i<356; i++)); do
     : >"$ref_dir/ref-$$-$i"
