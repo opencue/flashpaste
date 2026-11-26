@@ -5,6 +5,7 @@ set -euo pipefail
 
 [[ ${1:-} == on && ${2:-} == 0 && ${3:-} =~ ^[1-9][0-9]*$ ]] || exit 1
 [[ ${4:-} =~ ^[1-9][0-9]*-[1-9][0-9]*$ ]] || exit 1
+[[ -z ${5:-} || $5 == screenshot ]] || exit 1
 client_token=$4
 
 # The pane's current command can be "node" when Codex was launched through
@@ -68,7 +69,22 @@ has_pasteable_png() {
     return "$found"
 }
 
-if [ -n "${WAYLAND_DISPLAY:-}${WAYLAND_SOCKET:-}" ]; then
+if [[ ${5:-} == screenshot ]]; then
+    # This explicit menu action selects a saved screenshot, not the clipboard.
+    # Don't open a Wayland surface or fall back to another clipboard path.
+    backend=screenshot
+    shots=${FLASHPASTE_SCREENSHOTS_DIR:-$HOME/Pictures/Screenshots}
+    [[ $shots == /* ]] || exit 1
+    IFS= read -r -d '' entry < <(
+        find "$shots" -maxdepth 1 -type f -iname '*.png' ! -iname 'flashpaste-clip-*.png' \
+            -newermt '60 seconds ago' ! -newermt now -printf '%T@ %p\0' 2>/dev/null |
+            sort -znr
+    ) || exit 1
+    source=${entry#* }
+    [[ -f $source && ! -L $source && -O $source ]] || exit 1
+    read_png=(cat -- "$source")
+    read_timeout=0.30s
+elif [ -n "${WAYLAND_DISPLAY:-}${WAYLAND_SOCKET:-}" ]; then
     # Bypass the wl-paste shim: its fallback may report stale XWayland
     # formats even when the current Wayland offer is text or unavailable.
     wl=${FLASHPASTE_REAL_WL_PASTE:-/usr/bin/wl-paste}
@@ -86,12 +102,14 @@ elif [ -n "${DISPLAY:-}" ]; then
 else
     exit 1
 fi
-types=$(timeout -k 0.05s 0.10s "${probe_types[@]}" 2>/dev/null) || {
-    status=$?
-    case $status in 124|137) native_fallback probe-types "$status" ;; esac
-    exit 1 # e.g. no clipboard selection; normal, don't log every text paste
-}
-has_pasteable_png "$types" || exit 1
+if [[ $backend != screenshot ]]; then
+    types=$(timeout -k 0.05s 0.10s "${probe_types[@]}" 2>/dev/null) || {
+        status=$?
+        case $status in 124|137) native_fallback probe-types "$status" ;; esac
+        exit 1 # e.g. no clipboard selection; normal, don't log every text paste
+    }
+    has_pasteable_png "$types" || exit 1
+fi
 
 umask 077
 dir=${XDG_CACHE_HOME:-$HOME/.cache}/flashpaste/codex-attachments
