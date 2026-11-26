@@ -15,7 +15,11 @@ cat >"$tmp/bin/wl-paste" <<'SH'
 echo "wl $*" >>"$CALLS"
 case "$*" in
   --list-types)
-    case "$MODE" in image|bad|fallback) printf 'image/png\n' ;; text) printf 'text/plain\n' ;; esac
+    case "$MODE" in
+      image|bad|fallback) sleep "${PROBE_DELAY:-0}"; printf 'image/png\n' ;;
+      text) printf 'text/plain\n' ;;
+      wedged) sleep 1 ;;
+    esac
     ;;
   '-t image/png')
     case "$MODE" in bad|fallback) printf 'not an image' ;; *) cat "$PNG" ;; esac
@@ -42,11 +46,15 @@ run() { : >"$CALLS"; MODE="$1" bash "$root/bin/paste_image.sh" "${@:2}"; }
 forbidden() {
   if grep -Eq -- "$1" "$CALLS"; then printf 'Unexpected clipboard call:\n' >&2; cat "$CALLS" >&2; exit 1; fi
 }
+once() {
+  [ "$(grep -cE -- "$1" "$CALLS")" -eq 1 ] || { cat "$CALLS" >&2; exit 1; }
+}
 
 run image
 grep -q 'kitty .* send-text' "$CALLS"
 cmp "$PNG" "$FLASHPASTE_CAPTURE_DIR/flashpaste-clip-latest.png"
 forbidden '^(x |wl --no-newline)'
+once '^wl --list-types$'
 
 run text
 grep -q 'kitty .* action --self paste_from_clipboard' "$CALLS"
@@ -64,9 +72,15 @@ grep -q 'kitty .* action --self paste_from_clipboard' "$CALLS"
 forbidden '^(x |wl )'
 
 run silent
-grep -q 'x .*TARGETS' "$CALLS"
+once '^wl --list-types$'
+once '^x .*TARGETS'
 grep -q 'kitty .* send-text' "$CALLS"
 forbidden 'wl --no-newline|x .*text/plain'
+
+FLASHPASTE_CAPTURE_NAME=timeout.png run wedged
+once '^wl --list-types$'
+once '^x .*TARGETS'
+cmp "$PNG" "$FLASHPASTE_CAPTURE_DIR/timeout.png"
 
 FLASHPASTE_CAPTURE_NAME=fallback.png run fallback
 grep -q 'x .*image/png' "$CALLS"
