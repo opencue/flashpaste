@@ -42,32 +42,6 @@ _clog_helper=$(command -v clip-pipeline-log.sh 2>/dev/null || true)
 type clog >/dev/null 2>&1 || clog() { :; }
 clog "paste-image" "event=invoked" "arg='${1:-}'" "KITTY_WINDOW_ID='${KITTY_WINDOW_ID:-}'" "KITTY_LISTEN_ON='${KITTY_LISTEN_ON:-}'"
 
-# Snapshot what's on clipboard for diagnostics — SYNCHRONOUS so the log
-# captures pre-paste state, not post-paste. On GNOME-46/mutter the
-# X11<->Wayland clipboard bridge is wedged: after a screenshot, xclip
-# keeps advertising image/png even once fresh text is copied. Capturing
-# both sides in one event makes that divergence visible at a glance.
-_wl_types=$(timeout 0.5 wl-paste --list-types 2>/dev/null | tr '\n' ',')
-_wl_rc=$?
-_x_types=$(timeout 0.5 xclip -selection clipboard -t TARGETS -o 2>/dev/null | tr '\n' ',')
-# Only call wl-paste a second time when the first probe actually answered.
-# When mutter's data-device is wedged --list-types already timed out and
-# --no-newline just adds another 500ms wait and another "wl-clipboard
-# ready" dock flash for no value.
-if [ "$_wl_rc" = "0" ] && [ -n "$_wl_types" ]; then
-  _wl_text=$(timeout 0.5 wl-paste --no-newline 2>/dev/null | head -c 120 | tr '\n\r\t' '   ')
-else
-  _wl_text=
-fi
-_x_text=$(timeout 0.5 xclip -selection clipboard -t text/plain -o 2>/dev/null | head -c 120 | tr '\n\r\t' '   ')
-case "$_wl_types,$_x_types" in *image/*) _has_image=1 ;; *) _has_image=0 ;; esac
-_stale=0
-if [ "$_has_image" = "1" ] && { [ -n "$_wl_text" ] || [ -n "$_x_text" ]; }; then _stale=1; fi
-clog "paste-image" "event=clip-snapshot" \
-  "wl_types='$_wl_types'" "x_types='$_x_types'" \
-  "wl_text='$_wl_text'" "x_text='$_x_text'" \
-  "has_image=$_has_image" "stale_mirror_suspected=$_stale"
-
 # Find the live kitty socket
 sock="${KITTY_LISTEN_ON:-}"
 if [ -z "$sock" ] || [ ! -S "${sock#unix:}" ]; then
@@ -89,7 +63,14 @@ clog "paste-image" "event=socket-resolved" "sock='$sock'"
 #                  paste whatever's on the clipboard, image or text.
 mode="${1:-auto}"
 if [ "$mode" = "auto" ]; then
-  if [ "$_has_image" = "1" ]; then
+  # Wayland is authoritative when it answers. The wl-paste shim may
+  # already fall back to X11; probe X11 here only if PATH has a plain
+  # wl-paste with no result. Never read clipboard data just to log it.
+  types=$(timeout 0.5 wl-paste --list-types 2>/dev/null) || types=
+  if [ -z "$types" ]; then
+    types=$(timeout 0.5 xclip -selection clipboard -t TARGETS -o 2>/dev/null) || types=
+  fi
+  if [[ $'\n'"$types" == *$'\n'image/* ]]; then
     mode=image
     clog "paste-image" "event=auto-route" "decision=image" "reason=clipboard-has-image"
   else
