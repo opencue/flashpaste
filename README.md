@@ -238,6 +238,32 @@ inputs.flashpaste.url = "github:NagyVikt/flashpaste";
 
 **System packages:** `wl-clipboard xclip xsel ydotool ydotoold tmux kitty`.
 
+### Optional: windowless Paste in Codex on GNOME 46
+
+The regular **Paste** menu entry can ask GNOME Shell for the current text or PNG
+instead of opening a temporary Wayland window. This is opt-in: the extension
+lets same-user programs with access to a token in your private runtime
+directory request the active clipboard while your desktop is unlocked. It
+neither polls nor keeps history.
+
+From the source checkout, with your distro's Python GI bindings installed
+(`python3-gi` on Ubuntu/Debian):
+
+```sh
+extension="${XDG_DATA_HOME:-$HOME/.local/share}/gnome-shell/extensions/clipboard@flashpaste"
+install -Dm644 share/gnome-shell/extensions/clipboard@flashpaste/metadata.json "$extension/metadata.json"
+install -Dm644 share/gnome-shell/extensions/clipboard@flashpaste/extension.js "$extension/extension.js"
+install -Dm755 bin/flashpaste-gnome-clipboard "$HOME/.local/bin/flashpaste-gnome-clipboard"
+install -Dm755 bin/flashpaste-paste-codex-image.sh "$HOME/.local/bin/flashpaste-paste-codex-image.sh"
+```
+
+Use the updated right-click binding from `examples/tmux.conf.snippet` and set
+`@flashpaste-native-codex-image` to `on`. The updated binding removes temporary
+text after loading it. After your next normal GNOME login, run
+`gnome-extensions enable clipboard@flashpaste`. To opt out again, run
+`gnome-extensions disable clipboard@flashpaste`. If the service is unavailable,
+or the offer is neither supported text nor PNG, the existing paste path is used.
+
 ## How to verify FlashPaste works (30 seconds)
 
 1. Open **kitty** → **tmux** → Claude Code (or Codex, Aider, `llm`, …).

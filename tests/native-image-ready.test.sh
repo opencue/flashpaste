@@ -175,6 +175,31 @@ touch -d '2 minutes ago' "$shots/"Screenshot*.png
 ! run_screenshot || exit 1
 [[ ! -e $ref ]]
 
+# The same Paste action can consume the real compositor's current offer
+# without launching wl-paste or preferring a stale X11 image.
+cat >"$tmp/flashpaste-gnome-clipboard" <<'END'
+#!/bin/sh
+case "${BRIDGE_KIND:-}" in
+    png) . "$TEST_TMP/png-fixture"; write_png 80 >&3; printf 'png\n' ;;
+    text) cat "$TEST_TMP/live-text" >&3; printf 'text\n' ;;
+    *) exit 1 ;;
+esac
+END
+chmod +x "$tmp/flashpaste-gnome-clipboard"
+env WAYLAND_DISPLAY=wayland-0 FLASHPASTE_REAL_WL_PASTE=/bin/false \
+    BRIDGE_KIND=png "$probe" on 0 100 "$token" clipboard
+[[ $(wc -c <"$(staged_path)") = 80 ]]
+printf 'Új szöveg\nmásodik sor\n\n' >"$tmp/live-text"
+env WAYLAND_DISPLAY=wayland-0 FLASHPASTE_REAL_WL_PASTE=/bin/false DISPLAY=:1 \
+    X_TYPES=image/png BRIDGE_KIND=text "$probe" on 0 100 "$token" clipboard
+cmp "$tmp/live-text" "$ref"
+[[ $(stat -c '%a' "$ref") = 600 ]]
+! env WAYLAND_DISPLAY=wayland-0 FLASHPASTE_REAL_WL_PASTE=/bin/false BRIDGE_KIND=text \
+    "$probe" on 0 100 "$token" || exit 1 # old menu must never leave a text reference
+env WAYLAND_DISPLAY=wayland-0 WL_TYPES=image/png "$probe" on 0 100 "$token" clipboard
+[[ -f $(staged_path) ]]
+rm -- "$tmp/flashpaste-gnome-clipboard"
+
 # Clean stale client slots only when room is actually needed.
 for ((i=100; i<356; i++)); do
     : >"$ref_dir/ref-$$-$i"
