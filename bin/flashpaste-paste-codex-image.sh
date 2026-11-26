@@ -84,12 +84,24 @@ exec 9>"$dir/.lock"
 flock -n 9 || exit 1
 image=$(mktemp --suffix=.png "$dir/image.XXXXXXXX") || exit 1
 trap 'rm -f -- "$image"' EXIT
-timeout 0.30s "${read_png[@]}" 2>/dev/null | head -c 16777217 >"$image" || exit 1
+# Write straight to the attachment instead of relaying the PNG through a pipe.
+# Leave one extra KiB so even a truncated oversized write fails the size check.
+{
+    (
+        set +o posix # Bash uses 1 KiB units for ulimit -f outside POSIX mode.
+        limit=$(ulimit -Sf)
+        if [[ $limit == unlimited || $limit -gt 16385 ]]; then
+            ulimit -Sf 16385 || exit 1
+        fi
+        ulimit -Sc 0 || exit 1
+        exec timeout 0.30s "${read_png[@]}"
+    ) >"$image"
+} 2>/dev/null || exit 1
 size=$(wc -c <"$image")
 (( size >= 45 && size <= 16777216 )) || exit 1
 header=$(od -An -tx1 -N16 "$image")
 [[ ${header//[[:space:]]/} == 89504e470d0a1a0a0000000d49484452 ]] || exit 1
-end=$(tail -c 12 -- "$image" | od -An -tx1)
+end=$(od -An -tx1 -j "$((size - 12))" -N12 -- "$image")
 [[ ${end//[[:space:]]/} == 0000000049454e44ae426082 ]] || exit 1
 # Reclaim old files only when needed for space. Never evict a recent draft
 # attachment; if the cache is still full, fall back to the dispatcher.
@@ -112,10 +124,13 @@ refs=/tmp/flashpaste-codex-${4%-*}
 [[ ! -L $refs && -O $refs && $(stat -c '%a' -- "$refs") == 700 ]] || exit 1
 reference=$refs/ref-$4
 if [[ ! -e $reference ]]; then
-    find "$refs" -maxdepth 1 -type f -name 'ref-*' -mmin +1440 -delete || exit 1
     shopt -s nullglob
     slots=("$refs"/ref-*)
-    (( ${#slots[@]} < 256 )) || exit 1
+    if (( ${#slots[@]} >= 256 )); then
+        find "$refs" -maxdepth 1 -type f -name 'ref-*' -mmin +1440 -delete || exit 1
+        slots=("$refs"/ref-*)
+        (( ${#slots[@]} < 256 )) || exit 1
+    fi
 fi
 trap 'rm -f -- "$image" "$reference"' EXIT
 quoted=${image//\'/\'\\\'\'}

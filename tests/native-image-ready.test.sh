@@ -32,6 +32,16 @@ END
 for clipboard in "$tmp/wl-paste" "$tmp/xclip"; do
     sed -i '2i . "$TEST_TMP/png-fixture"' "$clipboard"
 done
+cat >"$tmp/timeout" <<'END'
+#!/bin/sh
+# Keep the real short deadline for the timeout case, not for fake clipboard
+# providers that may wait for CPU on a busy runner.
+if [ "${WL_SLOW:-0}" = 0 ]; then
+    shift
+    set -- 3s "$@"
+fi
+exec /usr/bin/timeout "$@"
+END
 cat >"$tmp/png-fixture" <<'END'
 write_png() {
     if [ "$1" -ge 32 ]; then
@@ -46,6 +56,12 @@ END
 chmod +x "$tmp/"*
 export PATH="$tmp:$PATH" FLASHPASTE_REAL_WL_PASTE="$tmp/wl-paste"
 export FLASHPASTE_PROC_ROOT="$tmp/proc" TEST_TMP="$tmp" XDG_CACHE_HOME="$tmp/cache"
+cat >"$tmp/find" <<'END'
+#!/bin/sh
+case "$1" in /tmp/flashpaste-codex-*) : >>"$TEST_TMP/ref-sweep" ;; esac
+exec /usr/bin/find "$@"
+END
+chmod +x "$tmp/find"
 mkdir -p "$FLASHPASTE_PROC_ROOT"/{100,789/task/789,790}
 printf '100 (shell) S 1 100 100 42 789 0\n' >"$FLASHPASTE_PROC_ROOT/100/stat"
 printf '789 (node) S 100 789 100 42 789 0\n' >"$FLASHPASTE_PROC_ROOT/789/stat"
@@ -75,6 +91,7 @@ staged_path() {
 
 export WL_BYTES=48 X_BYTES=48
 assert_probe 0 DISPLAY=:1 X_TYPES=image/png
+[[ ! -e $tmp/ref-sweep ]] || { echo 'swept an empty reference directory' >&2; exit 1; }
 assert_probe 0 WAYLAND_DISPLAY=wayland-0 WL_TYPES=image/png
 assert_probe 0 DISPLAY=:1 WAYLAND_DISPLAY=wayland-0 X_TYPES=image/png WL_TYPES=image/png
 assert_probe 0 DISPLAY=:1 X_TYPES=$'TARGETS\nimage/png\ntext/html'
@@ -95,6 +112,9 @@ assert_probe 0 DISPLAY=:1 X_TYPES=image/png X_BYTES=3147775
 assert_probe 1 WAYLAND_DISPLAY=wayland-0 WL_TYPES=image/png WL_BYTES=0
 assert_probe 1 WAYLAND_DISPLAY=wayland-0 WL_TYPES=image/png WL_BYTES=15
 assert_probe 1 WAYLAND_DISPLAY=wayland-0 WL_TYPES=image/png WL_BYTES=16777217
+assert_probe 1 WAYLAND_DISPLAY=wayland-0 WL_TYPES=image/png WL_BYTES=17825792
+assert_probe 0 WAYLAND_DISPLAY=wayland-0 WL_TYPES=image/png WL_BYTES=16777216
+rm -- "$(staged_path)"
 ! env DISPLAY=:1 X_TYPES=image/png "$probe" off 0 100 "$token" || exit 1
 ! env DISPLAY=:1 X_TYPES=image/png "$probe" on 1 100 "$token" || exit 1
 
@@ -116,6 +136,16 @@ truncate -s 134217728 "$cache/image.AAAAAAAA.png"
 assert_probe 1 DISPLAY=:1 X_TYPES=image/png
 [[ -f $second ]]
 rm "$cache/image.AAAAAAAA.png"
+
+# Clean stale client slots only when room is actually needed.
+for ((i=100; i<356; i++)); do
+    : >"$ref_dir/ref-$$-$i"
+done
+touch -d '2 days ago' "$ref_dir/ref-$$-100"
+assert_probe 0 DISPLAY=:1 X_TYPES=image/png
+[[ -e $tmp/ref-sweep && ! -e $ref_dir/ref-$$-100 ]]
+touch "$ref_dir/ref-$$-100"
+assert_probe 1 DISPLAY=:1 X_TYPES=image/png
 
 printf '790 (codex) S 789 790 100 42 789 0\n' >"$FLASHPASTE_PROC_ROOT/790/stat"
 assert_probe 1 DISPLAY=:1 X_TYPES=image/png
