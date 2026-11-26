@@ -56,6 +56,11 @@ cmp "$PNG" "$FLASHPASTE_CAPTURE_DIR/flashpaste-clip-latest.png"
 forbidden '^(x |wl --no-newline)'
 once '^wl --list-types$'
 
+# A standalone script beside its helper does not depend on PATH for staging.
+PATH="$tmp/bin:/usr/bin:/bin" FLASHPASTE_CAPTURE_NAME=sibling.png run image
+once '^wl --list-types$'
+cmp "$PNG" "$FLASHPASTE_CAPTURE_DIR/sibling.png"
+
 run text
 grep -q 'kitty .* action --self paste_from_clipboard' "$CALLS"
 forbidden '^(x |wl --no-newline|.*send-text)'

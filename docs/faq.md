@@ -142,4 +142,3 @@ Screenshots that were already there when the pruner first ran are never touched.
 ### Q. Can I get rid of GNOME's "Screenshot captured" notifications?
 
 GNOME Shell posts one per capture and Settings has no switch for it. The installer adds a small extension, `hide-screenshot-notifications@flashpaste`, that removes them from the notification list. On Wayland a new extension is only picked up at the next login.
-
