@@ -193,14 +193,15 @@ flashpaste-doctor                  # 17 core checks = ready
 
 With the current tmux snippet and a recent Codex TUI on Linux, you can opt
 into faster right-click **Paste** with `set -g @flashpaste-native-codex-image on`.
-For a readable PNG-only clipboard offer up to 16 MiB, FlashPaste sends a
+For a readable PNG clipboard offer up to 16 MiB, FlashPaste sends a
 file path to the foreground Codex pane instead of asking it to read the
 clipboard again. Each attachment keeps its own file in
 `$XDG_CACHE_HOME/flashpaste/codex-attachments` (default: `~/.cache`).
 The cache is capped at 128 MiB; new attachments only evict files older than
-24 hours to reclaim space. Text, mixed offers, unavailable clipboards, other agents, and
-file-only screenshots still use the regular dispatcher. This option does
-not change the keyboard binding.
+24 hours to reclaim space. A browser's accompanying `text/html` format does
+not block image paste. Plain text, URLs, other text formats, unavailable
+clipboards, other agents and file-only screenshots still use the regular
+dispatcher. This option does not change the keyboard binding.
 To turn it off, run `tmux set -gu @flashpaste-native-codex-image` and remove
 the opt-in line from your config.
 

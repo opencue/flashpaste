@@ -46,14 +46,16 @@ foreground_codex() {
 
 foreground_codex "$3" || exit 1
 
-png_only() {
-    # When text also exists, leave text-vs-image precedence to the regular
-    # dispatcher. Match full MIME lines, not arbitrary substrings.
+has_pasteable_png() {
+    # Browsers can export an HTML representation of the copied image along
+    # with the PNG. Never read or insert the HTML. Leave real text, URLs and
+    # other text formats to the regular dispatcher.
     local type found=1
     while IFS= read -r type; do
         case "$type" in
             image/png) found=0 ;;
-            text/*|UTF8_STRING|STRING|COMPOUND_TEXT) return 1 ;;
+            text/html|text/html\;*) ;;
+            text/*|UTF8_STRING|STRING|TEXT|COMPOUND_TEXT) return 1 ;;
         esac
     done <<<"$1"
     return "$found"
@@ -71,7 +73,7 @@ elif [ -n "${DISPLAY:-}" ]; then
 else
     exit 1
 fi
-png_only "$types" || exit 1
+has_pasteable_png "$types" || exit 1
 
 umask 077
 dir=${XDG_CACHE_HOME:-$HOME/.cache}/flashpaste/codex-attachments
