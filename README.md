@@ -191,6 +191,16 @@ tmux source-file ~/.tmux.conf      # then restart kitty
 flashpaste-doctor                  # 17 core checks = ready
 ```
 
+With the current tmux snippet and a recent Codex TUI on Linux, you can opt
+into faster right-click **Paste** with `set -g @flashpaste-native-codex-image on`.
+When a PNG-only clipboard offer up to 256 KiB is already readable, tmux sends
+Ctrl+V directly to the foreground Codex pane. Larger images, text, mixed
+offers, unavailable clipboards, other agents, and screenshots saved only to
+disk still use the regular dispatcher. This option does not change the
+keyboard binding.
+To turn it off, run `tmux set -gu @flashpaste-native-codex-image` and remove
+the opt-in line from your config.
+
 <details>
 <summary><b>Debian / Ubuntu — <code>.deb</code> package</b></summary>
 
