@@ -30,7 +30,7 @@ The missing clipboard glue between **GNOME · kitty · tmux** and your terminal 
 <p>
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-1f6feb?style=flat-square"></a>
   <a href="https://github.com/NagyVikt/flashpaste/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/NagyVikt/flashpaste?style=flat-square&color=1f6feb&label=release"></a>
-  <a href="https://github.com/NagyVikt/flashpaste/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/NagyVikt/flashpaste?style=flat-square&color=f0db4f&logo=github&logoColor=white"></a>
+  <a href="https://github.com/opencue/flashpaste"><img alt="GitHub stars" src="https://img.shields.io/github/stars/opencue/flashpaste?style=flat-square&color=f0db4f&logo=github&logoColor=white"></a>
   <a href="https://github.com/NagyVikt/flashpaste/actions/workflows/release.yml"><img alt="Release CI" src="https://github.com/NagyVikt/flashpaste/actions/workflows/release.yml/badge.svg?style=flat-square"></a>
   <a href="https://aur.archlinux.org/packages/flashpaste"><img alt="AUR" src="https://img.shields.io/badge/AUR-flashpaste-1793D1?style=flat-square&logo=archlinux&logoColor=white"></a>
 </p>
@@ -193,11 +193,14 @@ flashpaste-doctor                  # 17 core checks = ready
 
 With the current tmux snippet and a recent Codex TUI on Linux, you can opt
 into faster right-click **Paste** with `set -g @flashpaste-native-codex-image on`.
-When a PNG-only clipboard offer up to 256 KiB is already readable, tmux sends
-Ctrl+V directly to the foreground Codex pane. Larger images, text, mixed
-offers, unavailable clipboards, other agents, and screenshots saved only to
-disk still use the regular dispatcher. This option does not change the
-keyboard binding.
+For a readable PNG-only clipboard offer up to 16 MiB, FlashPaste sends a
+file path to the foreground Codex pane instead of asking it to read the
+clipboard again. Each attachment keeps its own file in
+`$XDG_CACHE_HOME/flashpaste/codex-attachments` (default: `~/.cache`).
+The cache is capped at 128 MiB; new attachments only evict files older than
+24 hours to reclaim space. Text, mixed offers, unavailable clipboards, other agents, and
+file-only screenshots still use the regular dispatcher. This option does
+not change the keyboard binding.
 To turn it off, run `tmux set -gu @flashpaste-native-codex-image` and remove
 the opt-in line from your config.
 
@@ -332,7 +335,7 @@ Yes — see [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`AGENTS.md`](AGENTS.md). T
 
 MIT — see [LICENSE](LICENSE). Built by [@NagyVikt](https://github.com/NagyVikt).
 
-If FlashPaste saved you a Wayland headache, a [GitHub star](https://github.com/NagyVikt/flashpaste/stargazers) helps others find it.
+If FlashPaste saved you a Wayland headache, a [GitHub star](https://github.com/opencue/flashpaste) helps others find it.
 
 ---
 

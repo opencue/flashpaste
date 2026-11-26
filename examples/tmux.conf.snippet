@@ -56,13 +56,13 @@ bind -n MouseDown2Pane run-shell -b "buf=$(sh -c '#{@paste}'); if [ -n \"$buf\" 
 # which is worse. v1.23 restores it.
 # Optional on Linux with a recent Codex TUI:
 # set -g @flashpaste-native-codex-image on
-# The menu's pane stays the target. send-keys (without -K) writes to that
-# pane, not tmux's key table, so the C-v binding is not re-entered.
+# The helper only stages the reference; tmux loads and bracket-pastes
+# it in the original client's queue without another tmux connection.
 bind -n MouseDown3Pane display-menu -O -t '{mouse}' -x M -y M \
   -T "#[align=centre,fg=#FFFFFF,bold] pane #{pane_index} " \
   "#[fg=#34C759]↳ Paste" p \
-    { if-shell "flashpaste-native-image-ready.sh #{q:@flashpaste-native-codex-image} #{pane_in_mode} #{pane_pid}" {
-        send-keys C-v
+    { if-shell "flashpaste-paste-codex-image.sh #{q:@flashpaste-native-codex-image} #{pane_in_mode} #{pane_pid} #{pid}-#{client_pid}" {
+        run-shell -C "load-buffer -b flashpaste-codex-#{client_pid} /tmp/flashpaste-codex-#{pid}/ref-#{pid}-#{client_pid} ; paste-buffer -d -p -b flashpaste-codex-#{client_pid} -t #{pane_id}"
       } {
         run-shell -b "TMUX_PASTE_TRIGGER=right-click-menu flashpaste-trigger '#{pane_id}' 2>/dev/null || TMUX_PASTE_TRIGGER=right-click-menu tmux-paste-dispatch '#{pane_id}' 2>/dev/null || TMUX_PASTE_TRIGGER=right-click-menu tmux-paste-dispatch.sh '#{pane_id}'"
       } }
