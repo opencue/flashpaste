@@ -70,10 +70,12 @@ valid_image() {
 
 stage() {
   if [ -z "$tmp" ]; then
-    mkdir -p -- "$DEST_DIR" || return 1
     # Same filesystem for atomic rename. The watcher ignores the random
     # six-character extension because it isn't png, jpg, or jpeg.
-    tmp=$(mktemp -- "$DEST_DIR/.flashpaste-capture.XXXXXX") || return 1
+    if ! mkdir -p -- "$DEST_DIR" || ! tmp=$(mktemp -- "$DEST_DIR/.flashpaste-capture.XXXXXX"); then
+      clog "capture-clip" "event=stage-failed" "dir='$DEST_DIR'"
+      exit 2
+    fi
   fi
   if ! timeout 0.5 "$@" >"$tmp" 2>/dev/null || [ ! -s "$tmp" ]; then
     clog "capture-clip" "event=read-failed-or-empty" "reader='${1##*/}'" "mime='$mime'"
@@ -91,6 +93,11 @@ src=
 wl_types=$(timeout 0.3 "$REAL_WL_PASTE" --list-types 2>/dev/null) || wl_types=
 mime=$(pick_mime "$wl_types") || mime=
 wl_mime=$mime
+# A fresh non-image selection is authoritative; X11 may still mirror an old image.
+if [ -n "$wl_types" ] && [ -z "$wl_mime" ]; then
+  clog "capture-clip" "event=no-image-mime" "src=wl-paste"
+  exit 1
+fi
 if [ -n "$mime" ] && stage "$REAL_WL_PASTE" -t "$mime"; then
   src=wl-paste
 else
@@ -105,7 +112,7 @@ if [ -z "$src" ]; then
     clog "capture-clip" "event=no-image-mime"
     exit 1
   fi
-  clog "capture-clip" "event=read-or-stage-failed" "mime='$mime'"
+  clog "capture-clip" "event=read-or-stage-failed" "wl_mime='$wl_mime'" "x_mime='$mime'"
   exit 2
 fi
 

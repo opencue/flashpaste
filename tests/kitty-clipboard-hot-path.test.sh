@@ -52,6 +52,13 @@ run text
 grep -q 'kitty .* action --self paste_from_clipboard' "$CALLS"
 forbidden '^(x |wl --no-newline|.*send-text)'
 
+: >"$CALLS"
+status=0
+MODE=text FLASHPASTE_CAPTURE_NAME=stale.png bash "$root/bin/flashpaste-capture-clip" >"$tmp/text-path" || status=$?
+[ "$status" -eq 1 ]
+[ ! -e "$FLASHPASTE_CAPTURE_DIR/stale.png" ]
+forbidden '^x '
+
 run image text
 grep -q 'kitty .* action --self paste_from_clipboard' "$CALLS"
 forbidden '^(x |wl )'
