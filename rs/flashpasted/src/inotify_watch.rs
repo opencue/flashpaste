@@ -193,19 +193,8 @@ fn run_watcher(
                 // *replace* the stage if it actually wins on bytes — never
                 // regress from a smaller raw to a larger compressed result.
                 let compressed: Option<(Vec<u8>, &'static str, std::path::PathBuf)> = match result {
-                    Ok((b, m)) if m == "image/png" || m == "image/jpeg" => {
-                        // Pass-through (no real compression happened, or
-                        // shape was already acceptable). Only re-stage
-                        // if bytes actually shrank — otherwise the raw
-                        // stage we did synchronously above is better.
-                        if b.len() < raw_len {
-                            Some((b, mime_for_string(&m), path_for_compress.clone()))
-                        } else {
-                            None
-                        }
-                    }
-                    Ok((b, m)) => {
-                        // Re-encoded (likely WebP). Write sibling tmpfile.
+                    Ok((b, m)) if b.len() < raw_len => {
+                        // Keep the path and MIME aligned even for the JPEG fallback.
                         let tmp = make_compressed_tmp_path(&path_for_compress, &m);
                         match std::fs::write(&tmp, &b) {
                             Ok(()) => {
@@ -228,6 +217,7 @@ fn run_watcher(
                             }
                         }
                     }
+                    Ok(_) => None,
                     Err(e) => {
                         warn!(
                             path = %path_for_compress.display(),

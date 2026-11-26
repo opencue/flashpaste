@@ -58,5 +58,26 @@ check "PRUNE_EXISTING still keeps fresh files" [ -e "$T/shots/fresh-1.png" -a -e
 FLASHPASTE_SCREENSHOT_KEEP=abc "$PRUNE" >/dev/null 2>&1
 check "a non-numeric setting is rejected" [ $? -eq 2 ]
 
+# Under pressure, remove older groups first but protect the newest and the last six hours.
+export FLASHPASTE_SCREENSHOTS_DIR="$T/quota"
+mkdir "$FLASHPASTE_SCREENSHOTS_DIR"
+for f in oldest next newest fresh; do
+  dd if=/dev/zero of="$FLASHPASTE_SCREENSHOTS_DIR/$f.png" bs=1M count=1 status=none
+done
+cd "$FLASHPASTE_SCREENSHOTS_DIR" || exit 2
+printf 'compressed sibling' >oldest.png.fpc.webp
+touch -d '12 hours ago' oldest.png
+touch -d '10 hours ago' next.png
+touch -d '8 hours ago' newest.png
+touch -d '1 hour ago' fresh.png
+preview=$(FLASHPASTE_SCREENSHOT_MAX_MIB=3 FLASHPASTE_SCREENSHOT_KEEP=2 "$PRUNE" --dry-run)
+check "dry run selects oldest group" grep -q 'would remove: .*oldest.png' <<<"$preview"
+check "dry run keeps oldest on disk" [ -e oldest.png ]
+FLASHPASTE_SCREENSHOT_MAX_MIB=3 FLASHPASTE_SCREENSHOT_KEEP=2 "$PRUNE" >/dev/null
+check "pressure removes oldest group and sibling" [ ! -e oldest.png -a ! -e oldest.png.fpc.webp ]
+check "pressure does not remove more than necessary" [ -e next.png -a -e newest.png -a -e fresh.png ]
+FLASHPASTE_SCREENSHOT_MAX_MIB=1 FLASHPASTE_SCREENSHOT_KEEP=1 "$PRUNE" >/dev/null
+check "images from the last six hours survive an over-budget directory" [ -e fresh.png ]
+
 echo "prune-screenshots: ${pass} passed, ${fail} failed"
 [ "$fail" -eq 0 ]
