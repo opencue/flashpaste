@@ -17,7 +17,10 @@ case "$*" in
     [ "${WL_SLOW:-0}" = 0 ] || sleep 1
     printf '%s\n' "${WL_TYPES:-}"
     ;;
-  "-t image/png") write_png "${WL_BYTES:-32}" ;;
+  "-t image/png")
+    [ "${WL_READ_DELAY:-0}" = 0 ] || sleep "$WL_READ_DELAY"
+    write_png "${WL_BYTES:-32}"
+    ;;
   *) exit 2 ;;
 esac
 END
@@ -36,11 +39,22 @@ cat >"$tmp/timeout" <<'END'
 #!/bin/sh
 # Keep the real short deadline for the timeout case, not for fake clipboard
 # providers that may wait for CPU on a busy runner.
-if [ "${WL_SLOW:-0}" = 0 ]; then
+kill_after=
+if [ "$1" = -k ]; then
+    kill_after=$2
+    shift 2
+fi
+if [ "${WL_SLOW:-0}" = 0 ] &&
+    { [ "${WL_READ_DELAY:-0}" = 0 ] || [ "$3" != -t ]; }; then
     shift
     set -- 3s "$@"
 fi
+if [ -n "$kill_after" ]; then set -- -k "$kill_after" "$@"; fi
 exec /usr/bin/timeout "$@"
+END
+cat >"$tmp/logger" <<'END'
+#!/bin/sh
+printf '%s\n' "$*" >>"$TEST_TMP/fallback.log"
 END
 cat >"$tmp/png-fixture" <<'END'
 write_png() {
@@ -105,6 +119,10 @@ assert_probe 1 WAYLAND_DISPLAY=wayland-0 WL_TYPES=$'image/png\ntext/html-other'
 assert_probe 1 DISPLAY=:1 WAYLAND_DISPLAY=wayland-0 X_TYPES=image/png WL_TYPES=text/plain
 assert_probe 1 DISPLAY=:1 WAYLAND_DISPLAY=wayland-0 X_TYPES=image/png
 assert_probe 1 DISPLAY=:1 WAYLAND_DISPLAY=wayland-0 X_TYPES=image/png WL_TYPES=image/png WL_SLOW=1
+grep -q 'backend=wayland phase=probe-types status=124' "$tmp/fallback.log"
+assert_probe 0 WAYLAND_DISPLAY=wayland-0 WL_TYPES=image/png WL_READ_DELAY=0.40
+assert_probe 1 WAYLAND_DISPLAY=wayland-0 WL_TYPES=image/png WL_READ_DELAY=2
+grep -q 'backend=wayland phase=read-png status=124' "$tmp/fallback.log"
 assert_probe 0 DISPLAY=:1 WAYLAND_DISPLAY=wayland-0 X_TYPES=UTF8_STRING WL_TYPES=image/png
 assert_probe 1 DISPLAY=:1 X_TYPES=$'image/png\nUTF8_STRING'
 assert_probe 1 DISPLAY=:1 X_TYPES=image/png-not-a-real-type

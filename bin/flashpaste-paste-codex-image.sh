@@ -5,6 +5,7 @@ set -euo pipefail
 
 [[ ${1:-} == on && ${2:-} == 0 && ${3:-} =~ ^[1-9][0-9]*$ ]] || exit 1
 [[ ${4:-} =~ ^[1-9][0-9]*-[1-9][0-9]*$ ]] || exit 1
+client_token=$4
 
 # The pane's current command can be "node" when Codex was launched through
 # npm or a task wrapper. Require Codex in the tty's foreground process group,
@@ -46,6 +47,12 @@ foreground_codex() {
 
 foreground_codex "$3" || exit 1
 
+native_fallback() {
+    # Report only metadata, never clipboard contents, filenames or MIME lists.
+    logger -t flashpaste-native -- "client=$client_token backend=$backend phase=$1 status=${2:-1}" 2>/dev/null || :
+    exit 1
+}
+
 has_pasteable_png() {
     # Browsers can export an HTML representation of the copied image along
     # with the PNG. Never read or insert the HTML. Leave real text, URLs and
@@ -65,24 +72,35 @@ if [ -n "${WAYLAND_DISPLAY:-}${WAYLAND_SOCKET:-}" ]; then
     # Bypass the wl-paste shim: its fallback may report stale XWayland
     # formats even when the current Wayland offer is text or unavailable.
     wl=${FLASHPASTE_REAL_WL_PASTE:-/usr/bin/wl-paste}
-    types=$(timeout 0.10s "$wl" --list-types 2>/dev/null) || exit 1
+    backend=wayland
+    probe_types=("$wl" --list-types)
     read_png=("$wl" -t image/png)
+    # A confirmed image can arrive late from a GNOME screenshot or a busy
+    # owner. Avoid falling into the slower clipboard round-trip at 300 ms.
+    read_timeout=0.65s
 elif [ -n "${DISPLAY:-}" ]; then
-    types=$(timeout 0.10s xclip -selection clipboard -t TARGETS -o 2>/dev/null) || exit 1
+    backend=x11
+    probe_types=(xclip -selection clipboard -t TARGETS -o)
     read_png=(xclip -selection clipboard -t image/png -o)
+    read_timeout=0.30s
 else
     exit 1
 fi
+types=$(timeout -k 0.05s 0.10s "${probe_types[@]}" 2>/dev/null) || {
+    status=$?
+    case $status in 124|137) native_fallback probe-types "$status" ;; esac
+    exit 1 # e.g. no clipboard selection; normal, don't log every text paste
+}
 has_pasteable_png "$types" || exit 1
 
 umask 077
 dir=${XDG_CACHE_HOME:-$HOME/.cache}/flashpaste/codex-attachments
-[[ $dir == /* && $dir != *[[:cntrl:]]* ]] || exit 1
-[[ -d $dir ]] || mkdir -p -- "$dir" || exit 1
-[[ ! -L $dir && -O $dir ]] || exit 1
-exec 9>"$dir/.lock"
-flock -n 9 || exit 1
-image=$(mktemp --suffix=.png "$dir/image.XXXXXXXX") || exit 1
+[[ $dir == /* && $dir != *[[:cntrl:]]* ]] || native_fallback cache-path
+[[ -d $dir ]] || mkdir -p -- "$dir" || native_fallback cache-directory "$?"
+[[ ! -L $dir && -O $dir ]] || native_fallback cache-owner
+exec 9>"$dir/.lock" || native_fallback cache-lock-open "$?"
+flock -n 9 || native_fallback cache-busy "$?"
+image=$(mktemp --suffix=.png "$dir/image.XXXXXXXX") || native_fallback cache-create "$?"
 trap 'rm -f -- "$image"' EXIT
 # Write straight to the attachment instead of relaying the PNG through a pipe.
 # Leave one extra KiB so even a truncated oversized write fails the size check.
@@ -94,15 +112,15 @@ trap 'rm -f -- "$image"' EXIT
             ulimit -Sf 16385 || exit 1
         fi
         ulimit -Sc 0 || exit 1
-        exec timeout 0.30s "${read_png[@]}"
+        exec timeout -k 0.05s "$read_timeout" "${read_png[@]}"
     ) >"$image"
-} 2>/dev/null || exit 1
-size=$(wc -c <"$image")
-(( size >= 45 && size <= 16777216 )) || exit 1
-header=$(od -An -tx1 -N16 "$image")
-[[ ${header//[[:space:]]/} == 89504e470d0a1a0a0000000d49484452 ]] || exit 1
-end=$(od -An -tx1 -j "$((size - 12))" -N12 -- "$image")
-[[ ${end//[[:space:]]/} == 0000000049454e44ae426082 ]] || exit 1
+} 2>/dev/null || native_fallback read-png "$?"
+size=$(wc -c <"$image") || native_fallback png-size "$?"
+(( size >= 45 && size <= 16777216 )) || native_fallback png-size
+header=$(od -An -tx1 -N16 "$image") || native_fallback png-header "$?"
+[[ ${header//[[:space:]]/} == 89504e470d0a1a0a0000000d49484452 ]] || native_fallback png-header
+end=$(od -An -tx1 -j "$((size - 12))" -N12 -- "$image") || native_fallback png-footer "$?"
+[[ ${end//[[:space:]]/} == 0000000049454e44ae426082 ]] || native_fallback png-footer
 # Reclaim old files only when needed for space. Never evict a recent draft
 # attachment; if the cache is still full, fall back to the dispatcher.
 cache_has_space() {
@@ -111,28 +129,28 @@ cache_has_space() {
     (( ${usage%%[[:space:]]*} <= 134217728 ))
 }
 if ! cache_has_space; then
-    find "$dir" -maxdepth 1 -type f -name 'image.????????.png' -mmin +1440 -delete || exit 1
-    cache_has_space || exit 1
+    find "$dir" -maxdepth 1 -type f -name 'image.????????.png' -mmin +1440 -delete || native_fallback cache-prune "$?"
+    cache_has_space || native_fallback cache-full
 fi
-foreground_codex "$3" || exit 1
+foreground_codex "$3" || native_fallback pane-changed
 
 # The synchronous tmux menu queue reads this client's reference before
 # processing another action from the same client. The reference names
 # an immutable attachment; concurrent clients use separate slots.
-refs=/tmp/flashpaste-codex-${4%-*}
-[[ -d $refs ]] || mkdir -m 700 -- "$refs" 2>/dev/null || [[ -d $refs ]] || exit 1
-[[ ! -L $refs && -O $refs && $(stat -c '%a' -- "$refs") == 700 ]] || exit 1
-reference=$refs/ref-$4
+refs=/tmp/flashpaste-codex-${client_token%-*}
+[[ -d $refs ]] || mkdir -m 700 -- "$refs" 2>/dev/null || [[ -d $refs ]] || native_fallback reference-directory
+[[ ! -L $refs && -O $refs && $(stat -c '%a' -- "$refs") == 700 ]] || native_fallback reference-owner
+reference=$refs/ref-$client_token
 if [[ ! -e $reference ]]; then
     shopt -s nullglob
     slots=("$refs"/ref-*)
     if (( ${#slots[@]} >= 256 )); then
-        find "$refs" -maxdepth 1 -type f -name 'ref-*' -mmin +1440 -delete || exit 1
+        find "$refs" -maxdepth 1 -type f -name 'ref-*' -mmin +1440 -delete || native_fallback reference-prune "$?"
         slots=("$refs"/ref-*)
-        (( ${#slots[@]} < 256 )) || exit 1
+        (( ${#slots[@]} < 256 )) || native_fallback reference-full
     fi
 fi
 trap 'rm -f -- "$image" "$reference"' EXIT
 quoted=${image//\'/\'\\\'\'}
-printf "'%s'" "$quoted" >"$reference"
+printf "'%s'" "$quoted" >"$reference" || native_fallback reference-write "$?"
 trap - EXIT
