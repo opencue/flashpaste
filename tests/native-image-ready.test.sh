@@ -77,6 +77,12 @@ export WL_BYTES=48 X_BYTES=48
 assert_probe 0 DISPLAY=:1 X_TYPES=image/png
 assert_probe 0 WAYLAND_DISPLAY=wayland-0 WL_TYPES=image/png
 assert_probe 0 DISPLAY=:1 WAYLAND_DISPLAY=wayland-0 X_TYPES=image/png WL_TYPES=image/png
+assert_probe 0 DISPLAY=:1 X_TYPES=$'TARGETS\nimage/png\ntext/html'
+assert_probe 0 WAYLAND_DISPLAY=wayland-0 WL_TYPES=$'image/png\ntext/html;charset=utf-8'
+assert_probe 1 WAYLAND_DISPLAY=wayland-0 WL_TYPES=$'image/png\ntext/html\ntext/plain;charset=utf-8'
+assert_probe 1 WAYLAND_DISPLAY=wayland-0 WL_TYPES=$'image/png\ntext/html\ntext/uri-list'
+assert_probe 1 WAYLAND_DISPLAY=wayland-0 WL_TYPES=text/html
+assert_probe 1 WAYLAND_DISPLAY=wayland-0 WL_TYPES=$'image/png\ntext/html-other'
 # A stale XWayland image must never override authoritative Wayland text,
 # a silent clipboard, or a timed-out clipboard owner.
 assert_probe 1 DISPLAY=:1 WAYLAND_DISPLAY=wayland-0 X_TYPES=image/png WL_TYPES=text/plain
