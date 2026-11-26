@@ -18,7 +18,8 @@
 //!    entirely.
 //! 2. Otherwise: load via the `image` crate, downscale so the longest
 //!    side is ≤ `max_dim` (preserving aspect ratio), re-encode as
-//!    `image/webp` at quality 80. If the WebP encoder errors out (bad
+//!    `image/webp`. For PNG screenshots, try lossless within the byte
+//!    budget before falling back to WebP quality 80. If WebP errors out (bad
 //!    build, weird pixel format), fall back to JPEG quality 85.
 //! 3. Caller decides what to do with the returned `(bytes, mime)` — most
 //!    commonly write to a tmpfile and pass the new path on.
@@ -35,11 +36,12 @@
 //!
 //! ## Defaults
 //!
-//! * `max_bytes = 4 MB` — comfortably below Claude Code's attachment cap.
-//! * `max_dim = 2400` — long-side. Big enough that UI screenshots stay
+//! * `max_bytes = 3.5 MB` — leaves attachment headroom.
+//! * `max_dim = 1568` — long-side. Big enough that UI screenshots stay
 //!   readable; small enough that a 4K dual-monitor capture (~7680×2160)
 //!   compresses to a sane size after the downscale.
 
+use std::borrow::Cow;
 use std::fs;
 use std::path::Path;
 
@@ -63,7 +65,7 @@ pub const DEFAULT_MAX_DIM: u32 = 1568;
 /// pass-through branch and `"image/webp"` / `"image/jpeg"` for the
 /// re-encode branches.
 ///
-/// `max_bytes`: hard ceiling — files at or below this are returned
+/// `max_bytes`: pass-through threshold and lossless budget — files at or below this are returned
 /// untouched. `max_dim`: longest side after downscale (only applied on
 /// the re-encode branch).
 pub fn compress_for_attach(
@@ -88,7 +90,19 @@ pub fn compress_for_attach(
     // Slow path: decode → downscale → re-encode.
     let img = image::open(path).with_context(|| format!("decode {}", path.display()))?;
 
-    let resized = downscale(&img, max_dim);
+    let resized = downscale(&img, max_dim.max(1));
+    if mime_for_path(path) == "image/png" {
+        // Lossless preserves edges and antialiasing in UI/code screenshots.
+        let rgba = resized.to_rgba8();
+        let encoder = webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height());
+        if let Some(bytes) = encoder
+            .encode_simple(true, 30.0)
+            .ok()
+            .filter(|bytes| bytes.len() <= max_bytes)
+        {
+            return Ok((bytes.to_vec(), "image/webp".to_string()));
+        }
+    }
 
     match encode_webp(&resized) {
         Ok(bytes) => Ok((bytes, "image/webp".to_string())),
@@ -119,18 +133,17 @@ pub fn compress_for_attach_env(path: &Path) -> Result<(Vec<u8>, String)> {
 }
 
 /// Return `img` resized so the longest side is `max_dim` (preserving
-/// aspect ratio). If `img` is already within bounds, returns a clone —
-/// avoids a redundant filter pass.
-fn downscale(img: &DynamicImage, max_dim: u32) -> DynamicImage {
+/// aspect ratio). Borrow the image if it is already within bounds.
+fn downscale(img: &DynamicImage, max_dim: u32) -> Cow<'_, DynamicImage> {
     let (w, h) = (img.width(), img.height());
     if w <= max_dim && h <= max_dim {
-        return img.clone();
+        return Cow::Borrowed(img);
     }
     // `resize` preserves aspect ratio by fitting inside (max_dim,max_dim).
     // Lanczos3 is the right filter for a single resize: sharper than
     // Triangle and almost free at these dimensions (one shot, not a
     // multi-stage pyramid).
-    img.resize(max_dim, max_dim, FilterType::Lanczos3)
+    Cow::Owned(img.resize(max_dim, max_dim, FilterType::Lanczos3))
 }
 
 fn encode_webp(img: &DynamicImage) -> Result<Vec<u8>> {
@@ -143,7 +156,9 @@ fn encode_webp(img: &DynamicImage) -> Result<Vec<u8>> {
     // Quality 80.0 is the sweet spot for UI screenshots: aggressive
     // enough to halve the size vs PNG, conservative enough that text
     // antialiasing stays clean.
-    let encoded = encoder.encode(80.0);
+    let encoded = encoder
+        .encode_simple(false, 80.0)
+        .map_err(|error| anyhow::anyhow!("WebP encode: {error:?}"))?;
     Ok(encoded.to_vec())
 }
 
@@ -208,6 +223,37 @@ mod tests {
         dir.join(format!("flashpaste-compress-test-{pid}-{name}"))
             .to_string_lossy()
             .into_owned()
+    }
+
+    #[test]
+    fn ui_screenshot_keeps_text_pixels_when_lossless_webp_fits() {
+        use image::codecs::png::{CompressionType, FilterType as PngFilter, PngEncoder};
+
+        let tmp = tempfile_path("code-ui.png");
+        let img = image::RgbImage::from_fn(900, 450, |x, y| {
+            let glyph = (y % 18 < 12) && x % 7 < 5 && ((x / 7) ^ (y / 3)) % 3 != 0;
+            image::Rgb(if glyph { [215, 225, 240] } else { [24, 28, 36] })
+        });
+        let file = fs::File::create(&tmp).unwrap();
+        PngEncoder::new_with_quality(file, CompressionType::Fast, PngFilter::NoFilter)
+            .write_image(
+                img.as_raw(),
+                img.width(),
+                img.height(),
+                image::ExtendedColorType::Rgb8,
+            )
+            .unwrap();
+        let budget = fs::metadata(&tmp).unwrap().len() as usize - 1;
+        let (bytes, mime) = compress_for_attach(Path::new(&tmp), budget, 1568).unwrap();
+        let _ = fs::remove_file(&tmp);
+
+        assert_eq!(mime, "image/webp");
+        assert!(bytes.len() <= budget);
+        let decoded = image::load_from_memory(&bytes).unwrap().to_rgb8();
+        assert_eq!(
+            decoded, img,
+            "UI glyph colors and dimensions must not change"
+        );
     }
 
     /// Exercise the re-encode branch: synthesize a 1200×800 RGB PNG,

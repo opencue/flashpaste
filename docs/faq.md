@@ -139,6 +139,10 @@ Yes. The file has to exist while a screenshot is being pasted (the agent is hand
 
 Screenshots that were already there when the pruner first ran are never touched. To clear that backlog too, run once: `FLASHPASTE_SCREENSHOT_PRUNE_EXISTING=1 flashpaste-prune-screenshots` (add `--dry-run` first to see what would go).
 
+The managed screenshots and their compressed copies have a soft target of 256 MiB (`FLASHPASTE_SCREENSHOT_MAX_MIB`; use `0` to disable it). Above the target, the hourly job removes the oldest eligible files first, but keeps the newest 20 and images less than six hours old under the default age settings. A recent burst can temporarily exceed the target; the older, protected library is not counted.
+
+FlashPaste does not change the original screenshot to make an attachment smaller. Large PNG attachments try lossless WebP after any necessary resize, preserving sharp text edges when the result fits. Small images still pass through unchanged; very large images fall back to the existing lossy compression when lossless WebP does not fit.
+
 ### Q. Can I get rid of GNOME's "Screenshot captured" notifications?
 
 GNOME Shell posts one per capture and Settings has no switch for it. The installer adds a small extension, `hide-screenshot-notifications@flashpaste`, that removes them from the notification list. On Wayland a new extension is only picked up at the next login.
